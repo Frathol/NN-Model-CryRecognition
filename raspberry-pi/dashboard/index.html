@@ -1,8 +1,9 @@
 <!DOCTYPE html>
-<html lang="id">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light only">
   <title>Smart Incubator — Dashboard</title>
   <link rel="stylesheet" href="style.css">
 </head>
@@ -11,10 +12,10 @@
   <header class="topbar">
     <div>
       <h1>Smart Incubator</h1>
-      <p class="sub">Pemantauan real-time · <span id="clock">--:--:--</span></p>
+      <p class="sub">Real-time monitoring · <span id="clock">--:--:--</span></p>
     </div>
     <div class="pills">
-      <span class="pill" id="pill-broker"><span class="dot"></span><span class="txt">Broker: menghubungkan…</span></span>
+      <span class="pill" id="pill-broker"><span class="dot"></span><span class="txt">Broker: connecting…</span></span>
       <span class="pill" id="pill-esp32"><span class="dot"></span><span class="txt">ESP32: —</span></span>
       <span class="pill" id="pill-cry"><span class="dot"></span><span class="txt">Cry service: —</span></span>
     </div>
@@ -24,38 +25,38 @@
 
   <section class="tiles">
     <article class="tile tile-cry" id="tile-cry">
-      <h2>Status bayi</h2>
+      <h2>Baby status</h2>
       <div class="cry-face" id="cry-icon" aria-hidden="true">🙂</div>
-      <div class="hero" id="cry-label">Menunggu data…</div>
+      <div class="hero" id="cry-label">Waiting for data…</div>
       <div class="meta"><span id="cry-prob">P(cry) —</span> · <span id="cry-level">Level — dB</span></div>
       <div class="meter" aria-hidden="true"><div id="cry-bar"></div></div>
       <div class="meta small" id="cry-since"></div>
       <div class="cry-reason" id="cry-reason" hidden>
-        <div class="meta">Kemungkinan penyebab: <strong id="cry-reason-label">—</strong> <span id="cry-reason-conf"></span></div>
-        <div class="meta small">Perkiraan model tahap 2, bukan diagnosis.</div>
+        <div class="meta">Possible cause: <strong id="cry-reason-label">—</strong> <span id="cry-reason-conf"></span></div>
+        <div class="meta small">Stage-2 model estimate, not a diagnosis.</div>
       </div>
     </article>
 
     <article class="tile">
-      <h2>Suhu udara (SHT31)</h2>
+      <h2>Air temperature (SHT31)</h2>
       <div class="hero"><span id="v-sht-temp">—</span><span class="unit">°C</span></div>
-      <div class="meta">Kelembapan <strong id="v-sht-hum">—</strong> %RH</div>
+      <div class="meta">Humidity <strong id="v-sht-hum">—</strong> %RH</div>
     </article>
 
     <article class="tile">
-      <h2>Suhu NTC</h2>
+      <h2>NTC temperature</h2>
       <div class="hero"><span id="v-ntc-temp">—</span><span class="unit">°C</span></div>
-      <div class="meta">Probe kulit / matras</div>
+      <div class="meta">Skin / mattress probe</div>
     </article>
 
     <article class="tile">
       <h2>DHT11</h2>
       <div class="hero"><span id="v-dht-temp">—</span><span class="unit">°C</span></div>
-      <div class="meta">Kelembapan <strong id="v-dht-hum">—</strong> %RH</div>
+      <div class="meta">Humidity <strong id="v-dht-hum">—</strong> %RH</div>
     </article>
 
     <article class="tile">
-      <h2>Detak jantung</h2>
+      <h2>Heart rate</h2>
       <div class="hero"><span id="v-bpm">—</span><span class="unit">BPM</span></div>
       <div class="meta" id="v-contact">Sensor: —</div>
     </article>
@@ -63,36 +64,36 @@
 
   <section class="charts">
     <figure class="card">
-      <figcaption>Suhu (°C)</figcaption>
-      <div class="chart-wrap"><canvas id="chart-temp" role="img" aria-label="Grafik suhu NTC, SHT31, DHT11"></canvas></div>
+      <figcaption>Temperature (°C)</figcaption>
+      <div class="chart-wrap"><canvas id="chart-temp" role="img" aria-label="Temperature chart: NTC, SHT31, DHT11"></canvas></div>
     </figure>
     <figure class="card">
-      <figcaption>Kelembapan (%RH)</figcaption>
-      <div class="chart-wrap"><canvas id="chart-hum" role="img" aria-label="Grafik kelembapan SHT31 dan DHT11"></canvas></div>
+      <figcaption>Humidity (%RH)</figcaption>
+      <div class="chart-wrap"><canvas id="chart-hum" role="img" aria-label="Humidity chart: SHT31 and DHT11"></canvas></div>
     </figure>
     <figure class="card">
-      <figcaption>Detak jantung (BPM)</figcaption>
-      <div class="chart-wrap"><canvas id="chart-bpm" role="img" aria-label="Grafik detak jantung"></canvas></div>
+      <figcaption>Heart rate (BPM)</figcaption>
+      <div class="chart-wrap"><canvas id="chart-bpm" role="img" aria-label="Heart rate chart"></canvas></div>
     </figure>
     <figure class="card">
-      <figcaption>Probabilitas menangis</figcaption>
-      <div class="chart-wrap"><canvas id="chart-cry" role="img" aria-label="Grafik probabilitas tangisan"></canvas></div>
+      <figcaption>Crying probability</figcaption>
+      <div class="chart-wrap"><canvas id="chart-cry" role="img" aria-label="Crying probability chart"></canvas></div>
     </figure>
   </section>
 
   <section class="card log">
-    <h2>Riwayat kejadian</h2>
+    <h2>Event log</h2>
     <table>
-      <thead><tr><th>Waktu</th><th>Kejadian</th><th>Detail</th></tr></thead>
+      <thead><tr><th>Time</th><th>Event</th><th>Details</th></tr></thead>
       <tbody id="events"></tbody>
     </table>
   </section>
 
-  <footer>Bukan perangkat medis tersertifikasi — selalu verifikasi dengan pemeriksaan langsung.</footer>
+  <footer>Not a certified medical device. Always verify with a direct check.</footer>
 </div>
 
 <script src="config.js"></script>
-<!-- Library lokal (diunduh setup_pi.sh); fallback ke CDN bila tidak ada -->
+<!-- Local libraries (downloaded by setup_pi.sh); falls back to CDN if missing -->
 <script src="vendor/mqtt.min.js"></script>
 <script>window.mqtt || document.write('<script src="https://unpkg.com/mqtt@5/dist/mqtt.min.js"><\/script>')</script>
 <script src="vendor/chart.umd.js"></script>

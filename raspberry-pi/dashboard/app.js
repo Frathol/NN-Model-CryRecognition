@@ -20,7 +20,7 @@
   //  Format & util
   // ------------------------------------------------------------------
   const fmt = (v, d = 1) => (v === null || v === undefined || Number.isNaN(v) ? "—" : Number(v).toFixed(d));
-  const hhmmss = (t) => new Date(t).toLocaleTimeString("id-ID", { hour12: false });
+  const hhmmss = (t) => new Date(t).toLocaleTimeString("en-GB", { hour12: false });
   const setText = (id, txt) => { const el = $(id); if (el) el.textContent = txt; };
 
   function setPill(id, cls, text) {
@@ -44,10 +44,10 @@
     const had = state.alarms.has(key);
     if (active) {
       state.alarms.set(key, { level, text });
-      if (!had) addEvent(level === "critical" ? "ALARM" : "Peringatan", text);
+      if (!had) addEvent(level === "critical" ? "ALARM" : "Warning", text);
     } else if (had) {
       state.alarms.delete(key);
-      addEvent("Normal", text.split(":")[0] + " kembali normal");
+      addEvent("Normal", text.split(":")[0] + " back to normal");
     }
     renderAlarms();
   }
@@ -61,7 +61,7 @@
       const icon = document.createElement("span");
       icon.className = "icon"; icon.textContent = level === "critical" ? "⛔" : "⚠️";
       const lbl = document.createElement("strong");
-      lbl.textContent = level === "critical" ? "Kritis" : "Peringatan";
+      lbl.textContent = level === "critical" ? "Critical" : "Warning";
       const txt = document.createElement("span"); txt.textContent = text;
       div.append(icon, lbl, txt);
       box.appendChild(div);
@@ -72,11 +72,11 @@
     const bad = value !== null && value !== undefined && (value < lim.min || value > lim.max);
     if (tileEl) tileEl.classList.toggle("out-of-range", bad);
     setAlarm(key, bad, "critical",
-      `${label}: ${fmt(value, dec)} ${unit} (batas ${lim.min}–${lim.max} ${unit})`);
+      `${label}: ${fmt(value, dec)} ${unit} (limit ${lim.min}–${lim.max} ${unit})`);
   }
 
   // ------------------------------------------------------------------
-  //  Grafik
+  //  Charts
   // ------------------------------------------------------------------
   const HIST_MS = CFG.historyMinutes * 60 * 1000;
 
@@ -129,7 +129,7 @@
       { label: "DHT11", color: "--series-3" },
     ], { suggestedMin: 30, suggestedMax: 38 });
     charts.hum = makeChart("chart-hum", [
-      { label: "SHT31", color: "--series-2" },   // warna mengikuti sensor, konsisten antar grafik
+      { label: "SHT31", color: "--series-2" },   // colour follows the sensor, consistent across charts
       { label: "DHT11", color: "--series-3" },
     ], { suggestedMin: 30, suggestedMax: 90 });
     charts.bpm = makeChart("chart-bpm", [{ label: "BPM", color: "--series-1" }],
@@ -153,7 +153,6 @@
       c.update("none");
     }
   }
-  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", applyTheme);
 
   function push(chart, idx, t, y) {
     const d = chart.data.datasets[idx].data;
@@ -173,7 +172,7 @@
   }, 1000);
 
   // ------------------------------------------------------------------
-  //  Handler pesan
+  //  Message handlers
   // ------------------------------------------------------------------
   function onSensors(m) {
     const t = Date.now();
@@ -187,33 +186,33 @@
     setText("v-sht-temp", fmt(shtT)); setText("v-sht-hum", fmt(shtH, 0));
     setText("v-dht-temp", fmt(dhtT)); setText("v-dht-hum", fmt(dhtH, 0));
     setText("v-bpm", fmt(bpm, 0));
-    setText("v-contact", m.heart?.sensor_ok === false ? "Sensor: tidak terdeteksi"
-      : contact ? (bpm === null ? "Sensor menempel · menghitung…" : "Sensor menempel")
-      : "Sensor tidak menempel");
+    setText("v-contact", m.heart?.sensor_ok === false ? "Sensor: not detected"
+      : contact ? (bpm === null ? "Sensor attached · measuring…" : "Sensor attached")
+      : "Sensor not attached");
 
     push(charts.temp, 0, t, ntc); push(charts.temp, 1, t, shtT); push(charts.temp, 2, t, dhtT);
     push(charts.hum, 0, t, shtH); push(charts.hum, 1, t, dhtH);
     push(charts.bpm, 0, t, bpm);
     dirty = true;
 
-    // Sensor utama suhu/kelembapan = SHT31; fallback DHT11
+    // Primary temperature/humidity sensor = SHT31; DHT11 as fallback
     const temp = shtT ?? dhtT, hum = shtH ?? dhtH;
-    checkRange("temp", "Suhu", temp, CFG.limits.temp, "°C", $("v-sht-temp").closest(".tile"));
-    checkRange("hum", "Kelembapan", hum, CFG.limits.hum, "%RH", null);
-    if (contact) checkRange("bpm", "Detak jantung", bpm, CFG.limits.bpm, "BPM", $("v-bpm").closest(".tile"), 0);
-    else checkRange("bpm", "Detak jantung", null, CFG.limits.bpm, "BPM", $("v-bpm").closest(".tile"));
+    checkRange("temp", "Temperature", temp, CFG.limits.temp, "°C", $("v-sht-temp").closest(".tile"));
+    checkRange("hum", "Humidity", hum, CFG.limits.hum, "%RH", null);
+    if (contact) checkRange("bpm", "Heart rate", bpm, CFG.limits.bpm, "BPM", $("v-bpm").closest(".tile"), 0);
+    else checkRange("bpm", "Heart rate", null, CFG.limits.bpm, "BPM", $("v-bpm").closest(".tile"));
     setAlarm("hr-contact", m.heart?.sensor_ok !== false && !contact, "warning",
-      "Sensor detak jantung tidak menempel pada bayi");
-    setAlarm("sht-fail", shtT === null, "warning", "SHT31 tidak memberi data");
+      "Heart rate sensor is not attached to the baby");
+    setAlarm("sht-fail", shtT === null, "warning", "SHT31 is not returning data");
   }
 
-  // Alasan tangisan dari model tahap 2 (hanya dikirim audio_detector.py)
+  // Cry reason from the stage-2 model (sent only by audio_detector.py)
   const REASON_TEXT = {
-    hungry: "Lapar",
-    belly_pain: "Sakit perut",
-    burping: "Ingin bersendawa",
-    discomfort: "Tidak nyaman",
-    tired: "Lelah / mengantuk",
+    hungry: "Hungry",
+    belly_pain: "Belly pain",
+    burping: "Needs to burp",
+    discomfort: "Discomfort",
+    tired: "Tired / sleepy",
   };
 
   function showReason(m) {
@@ -232,7 +231,7 @@
     setText("cry-level", `Level ${fmt(m.level_db, 0)} dB`);
     $("cry-bar").style.width = `${Math.round(p * 100)}%`;
     if (!state.crying) {
-      setText("cry-label", m.label === "silence" ? "Tenang (hening)" : "Tenang");
+      setText("cry-label", m.label === "silence" ? "Calm (silent)" : "Calm");
       setText("cry-icon", "🙂");
     }
     if ("reason" in m) showReason(m);
@@ -244,12 +243,12 @@
     const was = state.crying;
     state.crying = !!m.crying;
     $("tile-cry").classList.toggle("crying", state.crying);
-    setText("cry-label", state.crying ? "BAYI MENANGIS" : "Tenang");
+    setText("cry-label", state.crying ? "BABY IS CRYING" : "Calm");
     setText("cry-icon", state.crying ? "😭" : "🙂");
-    setText("cry-since", state.crying && m.since ? `Sejak ${hhmmss(m.since * 1000)}` : "");
+    setText("cry-since", state.crying && m.since ? `Since ${hhmmss(m.since * 1000)}` : "");
     const reasonTxt = m.reason && m.reason !== "none"
-      ? `, kemungkinan ${(REASON_TEXT[m.reason] ?? m.reason).toLowerCase()}` : "";
-    setAlarm("cry", state.crying, "critical", `Bayi menangis: terdeteksi (p=${fmt(m.cry_prob, 2)}${reasonTxt})`);
+      ? `, possibly ${(REASON_TEXT[m.reason] ?? m.reason).toLowerCase()}` : "";
+    setAlarm("cry", state.crying, "critical", `Baby crying: detected (p=${fmt(m.cry_prob, 2)}${reasonTxt})`);
     showReason(m);
     if (was !== state.crying && !state.crying) setText("cry-since", "");
   }
@@ -261,18 +260,18 @@
     const now = Date.now(), to = CFG.sensorTimeoutSec * 1000;
     const espFresh = now - state.lastSensorAt < to;
     if (state.esp32 === "online" && espFresh) setPill("pill-esp32", "ok", "ESP32: online");
-    else if (state.esp32 === "online") setPill("pill-esp32", "warn", "ESP32: tidak ada data");
+    else if (state.esp32 === "online") setPill("pill-esp32", "warn", "ESP32: no data");
     else setPill("pill-esp32", "bad", `ESP32: ${state.esp32 === "unknown" ? "—" : state.esp32}`);
 
     const cs = state.cryService;
     if (cs === "online") setPill("pill-cry", now - state.lastCryAt < to ? "ok" : "warn",
-      now - state.lastCryAt < to ? "Cry service: online" : "Cry service: menunggu audio");
-    else if (cs === "no_mic") setPill("pill-cry", "warn", "Cry service: mic terputus");
+      now - state.lastCryAt < to ? "Cry service: online" : "Cry service: waiting for audio");
+    else if (cs === "no_mic") setPill("pill-cry", "warn", "Cry service: mic disconnected");
     else setPill("pill-cry", "bad", `Cry service: ${cs === "unknown" ? "—" : cs}`);
 
     setAlarm("esp-offline", state.esp32 !== "unknown" && !espFresh, "warning",
-      "Node sensor ESP32 tidak mengirim data");
-    setAlarm("mic", cs === "no_mic", "warning", "Mikrofon Bluetooth tidak terhubung");
+      "ESP32 sensor node is not sending data");
+    setAlarm("mic", cs === "no_mic", "warning", "Bluetooth microphone is not connected");
   }
   setInterval(refreshStatus, 1000);
   setInterval(() => setText("clock", hhmmss(Date.now())), 1000);
@@ -287,11 +286,11 @@
       reconnectPeriod: 3000, connectTimeout: 8000, clean: true,
     });
     client.on("connect", () => {
-      setPill("pill-broker", "ok", "Broker: terhubung");
+      setPill("pill-broker", "ok", "Broker: connected");
       client.subscribe(Object.values(T), { qos: 0 });
     });
-    client.on("reconnect", () => setPill("pill-broker", "warn", "Broker: menghubungkan ulang…"));
-    client.on("close", () => setPill("pill-broker", "bad", "Broker: terputus"));
+    client.on("reconnect", () => setPill("pill-broker", "warn", "Broker: reconnecting…"));
+    client.on("close", () => setPill("pill-broker", "bad", "Broker: disconnected"));
     client.on("error", (e) => setPill("pill-broker", "bad", "Broker: " + (e?.message || "error")));
 
     client.on("message", (topic, payload) => {
@@ -304,7 +303,7 @@
           case T.esp32:     state.esp32 = s; break;
           case T.cryStatus: state.cryService = s; break;
         }
-      } catch (e) { console.warn("Pesan tidak valid di", topic, e); }
+      } catch (e) { console.warn("Invalid message on", topic, e); }
     });
   }
 
