@@ -1,0 +1,8 @@
+ai-edge-litert>=1.2      # runtime TFLite (LiteRT) untuk ARM64
+numpy>=1.26
+scipy>=1.11
+librosa>=0.10.2
+soundfile>=0.12
+sounddevice>=0.4.6
+paho-mqtt>=2.0
+PyYAML>=6.0

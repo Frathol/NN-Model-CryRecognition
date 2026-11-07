@@ -1,0 +1,20 @@
+# /etc/mosquitto/smart-incubator.acl
+# Setiap klien hanya boleh menulis ke topic miliknya.
+
+# Node sensor ESP32-S3
+user esp32
+topic write incubator/sensors
+topic write incubator/esp32/status
+topic read  incubator/cmd/#
+
+# Layanan cry recognition di Raspberry Pi
+user cryservice
+topic write incubator/cry/#
+
+# Dashboard web (kredensial ini terlihat di browser -> HANYA baca)
+user dashboard
+topic read incubator/#
+
+# Akun admin untuk debugging (mosquitto_sub / mosquitto_pub)
+user admin
+topic readwrite #

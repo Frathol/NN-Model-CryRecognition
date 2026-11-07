@@ -1,0 +1,19 @@
+# systemd USER service (harus user service agar bisa mengakses PipeWire / mic Bluetooth)
+# Dipasang oleh setup_pi.sh ke ~/.config/systemd/user/cry-recognition.service
+[Unit]
+Description=Smart Incubator - Cry Recognition
+After=pipewire.service wireplumber.service
+Wants=pipewire.service wireplumber.service
+
+[Service]
+Type=simple
+WorkingDirectory=__CRY_DIR__
+EnvironmentFile=%h/.config/smart-incubator/cry.env
+# Tanda "-" = lanjut walau gagal (service akan menunggu mic & coba lagi sendiri)
+ExecStartPre=-__SCRIPTS_DIR__/connect_bt_mic.sh
+ExecStart=__CRY_DIR__/.venv/bin/python __CRY_DIR__/cry_service.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

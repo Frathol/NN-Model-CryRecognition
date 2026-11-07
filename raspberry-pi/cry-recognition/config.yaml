@@ -1,0 +1,50 @@
+# =====================================================================
+#  Konfigurasi layanan cry recognition (Raspberry Pi 5)
+# =====================================================================
+
+mqtt:
+  host: localhost
+  port: 1883
+  username: cryservice
+  password: ""                 # dikosongkan -> diambil dari env MQTT_PASSWORD
+  client_id: incubator-cry-service
+  topic_prefix: incubator/cry  # .../result, .../state, .../status
+
+audio:
+  # null  = sumber input default PipeWire (set mic Bluetooth sebagai default)
+  # "teks" = pilih perangkat input yang namanya mengandung teks ini
+  # angka = index perangkat (lihat: python cry_service.py --list-devices)
+  device: null
+  capture_rate: 16000          # mic Bluetooth (profil HFP) biasanya 16 kHz / 8 kHz
+  channels: 1
+
+model:
+  path: model/cry_model.tflite
+  labels: labels.txt           # satu label per baris, URUTAN = urutan output model
+  positive_label: cry          # label yang dianggap "menangis"
+  num_threads: 4
+
+# ---------------------------------------------------------------------
+#  Preprocessing — HARUS sama dengan saat training.
+#  Jalankan dulu:  python inspect_model.py
+#  lalu cocokkan dengan kode training (biasanya librosa.load + librosa.feature.*)
+#  Nilai default di bawah = default librosa (sr 22050, n_fft 2048, hop 512),
+#  karena itu yang dipakai jika saat training parameter tidak diubah.
+# ---------------------------------------------------------------------
+features:
+  type: auto          # auto | waveform | mfcc | mfcc_mean | melspec
+  sample_rate: 22050  # librosa.load() default = 22050
+  window_seconds: 0   # 0 = dihitung otomatis dari bentuk input model
+  n_mfcc: 20          # librosa.feature.mfcc default = 20 (sering diubah ke 13/40)
+  n_mels: 128         # librosa.feature.melspectrogram default = 128
+  n_fft: 2048
+  hop_length: 512
+  power_to_db: true   # melspec -> librosa.power_to_db(S, ref=np.max)
+  normalize: none     # none | standardize | minmax  (per-sampel)
+
+inference:
+  hop_seconds: 1.0         # jalankan inferensi tiap N detik (jendela bergeser)
+  silence_db: -55          # di bawah level ini dianggap hening, inferensi dilewati
+  cry_threshold: 0.60      # probabilitas minimum dianggap menangis
+  consecutive_for_alert: 2 # jumlah jendela berturut-turut sebelum status "menangis"
+  clear_after: 3           # jumlah jendela non-cry sebelum status kembali tenang
