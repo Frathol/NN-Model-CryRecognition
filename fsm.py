@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
-import json, time, argparse
+import os, json, time, argparse, threading
 import paho.mqtt.client as mqtt
+
+# Topic MQTT (sama dengan proyek smart-incubator)
+TOPIC_SENSORS = "incubator/sensors"           # ESP32: ntc, sht31, dht11, heart
+TOPIC_ESP_STATUS = "incubator/esp32/status"   # ESP32: online / offline
+TOPIC_CRY_RESULT = "incubator/cry/result"     # audio: hasil tiap jendela (+ alasan tahap 2)
+TOPIC_CRY_STATE = "incubator/cry/state"       # audio: {"crying": true/false, ...}
+TOPIC_CRY_STATUS = "incubator/cry/status"     # audio: online / no_mic / offline
+TOPIC_CMD = "incubator/cmd/setpoint"          # perintah: {"setpoint": 33.0}
+TOPIC_FSM_STATE = "incubator/fsm/state"       # keluaran FSM (retained)
 
 PRIORITY = [
     "CODE_BLUE",
@@ -18,8 +27,8 @@ PRIORITY = [
 parser = argparse.ArgumentParser(description="NeoSentinel Priority FSM Alert Engine")
 parser.add_argument("--broker", default="localhost")
 parser.add_argument("--port", type=int, default=1883)
-parser.add_argument("--user", default="fsm_engine")
-parser.add_argument("--password", default="PASSWORD")
+parser.add_argument("--user", default="fsm")
+parser.add_argument("--password", default=os.environ.get("MQTT_PASSWORD", ""))
 args = parser.parse_args()
 
 state_ctx = {
@@ -30,7 +39,7 @@ state_ctx = {
     "cry": False, "cry_since": None, "cry_reason": "none", "cry_reason_conf": 0.0,
     "mains_ok": True, "soc": 100.0,
     "code_blue": False,
-    "node_status": {"esp": "online", "audio_pi": "online"},
+    "node_status": {"esp": "online", "audio": "online"},
     "last_seen": {"env": time.time(), "audio": time.time()}
 }
 
@@ -42,7 +51,7 @@ def evaluate_fsm():
     # 1. Cek Koneksi Sensor / Node Offline (> 10 detik atau Last Will)
     if (
         state_ctx["node_status"].get("esp") == "offline"
-        or state_ctx["node_status"].get("audio_pi") == "offline"
+        or state_ctx["node_status"].get("audio") in ("offline", "no_mic")
         or (now - state_ctx["last_seen"]["env"] > 10.0)
     ):
         active.append("SENSOR_FAULT")
@@ -124,6 +133,13 @@ def evaluate_fsm():
         }
     }
 
+def _num(v):
+    """Nilai sensor yang gagal dibaca dikirim ESP32 sebagai null -> None."""
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+ctx_lock = threading.Lock()
+last_published = {"key": None, "at": 0.0}
+
 def on_message(client, userdata, msg):
     topic = msg.topic
     payload_raw = msg.payload.decode("utf-8", errors="ignore")
@@ -132,36 +148,73 @@ def on_message(client, userdata, msg):
     except Exception:
         data = {}
 
-    if topic.endswith("/env"):
-        state_ctx["t_air"] = float(data.get("t_air", state_ctx["t_air"]))
-        state_ctx["rh"] = float(data.get("rh", state_ctx["rh"]))
-        state_ctx["last_seen"]["env"] = time.time()
-    elif topic.endswith("/bio"):
-        state_ctx["t_skin"] = float(data.get("t_skin", state_ctx["t_skin"]))
-        state_ctx["hr"] = int(data.get("hr", state_ctx["hr"]))
-    elif topic.endswith("/audio"):
-        state_ctx["cry"] = bool(data.get("cry", False))
-        state_ctx["cry_reason"] = str(data.get("reason", "none"))
-        state_ctx["cry_reason_conf"] = float(data.get("reason_conf", 0.0))
-        state_ctx["last_seen"]["audio"] = time.time()
-    elif topic == "neo/power":
-        state_ctx["soc"] = float(data.get("soc", 100.0))
-        state_ctx["mains_ok"] = bool(data.get("mains_ok", True))
-    elif topic.endswith("/status"):
-        node_name = topic.split("/")[-2]
-        state_ctx["node_status"][node_name] = payload_raw.strip()
-    elif topic.endswith("/cmd"):
-        if "setpoint" in data:
-            state_ctx["setpoint_temp"] = float(data["setpoint"])
+    with ctx_lock:
+        if topic == TOPIC_SENSORS:
+            sht, dht = data.get("sht31") or {}, data.get("dht11") or {}
+            ntc, heart = data.get("ntc") or {}, data.get("heart") or {}
+            # Suhu & kelembapan udara: SHT31 sebagai sensor utama, DHT11 cadangan
+            t_air = _num(sht.get("temp"))
+            t_air = t_air if t_air is not None else _num(dht.get("temp"))
+            rh = _num(sht.get("hum"))
+            rh = rh if rh is not None else _num(dht.get("hum"))
+            t_skin = _num(ntc.get("temp"))                 # NTC = probe suhu kulit
+            hr = _num(heart.get("bpm")) if heart.get("contact") else None
+            if t_air is not None: state_ctx["t_air"] = t_air
+            if rh is not None: state_ctx["rh"] = rh
+            if t_skin is not None: state_ctx["t_skin"] = t_skin
+            if hr is not None: state_ctx["hr"] = int(hr)
+            state_ctx["last_seen"]["env"] = time.time()
+        elif topic == TOPIC_ESP_STATUS:
+            state_ctx["node_status"]["esp"] = payload_raw.strip()
+        elif topic == TOPIC_CRY_STATUS:
+            state_ctx["node_status"]["audio"] = payload_raw.strip()
+        elif topic == TOPIC_CRY_STATE:
+            state_ctx["cry"] = bool(data.get("crying", False))
+            state_ctx["last_seen"]["audio"] = time.time()
+        elif topic == TOPIC_CRY_RESULT:
+            # Alasan tangisan (tahap 2) hanya dikirim audio_detector.py
+            if "reason" in data:
+                state_ctx["cry_reason"] = str(data.get("reason", "none"))
+                state_ctx["cry_reason_conf"] = float(data.get("reason_conf", 0.0))
+            state_ctx["last_seen"]["audio"] = time.time()
+        elif topic == TOPIC_CMD:
+            if "setpoint" in data:
+                state_ctx["setpoint_temp"] = float(data["setpoint"])
+        else:
+            return   # topic lain (termasuk keluaran FSM sendiri) diabaikan -> tidak loop
+    publish_state(client)
 
-    out_state = evaluate_fsm()
-    client.publish("neo/inc01/state", json.dumps(out_state), qos=1, retain=True)
-    print("[FSM STATE]", out_state["state"], "| Advisory:", out_state["advisory"])
+def publish_state(client, heartbeat_s=5.0):
+    """Evaluasi FSM; publish bila hasilnya berubah atau tiap heartbeat_s detik."""
+    with ctx_lock:
+        out_state = evaluate_fsm()
+    key = (out_state["state"], tuple(out_state["active_alerts"]), out_state["advisory"])
+    now = time.time()
+    if key == last_published["key"] and now - last_published["at"] < heartbeat_s:
+        return
+    client.publish(TOPIC_FSM_STATE, json.dumps(out_state), qos=1, retain=True)
+    if key != last_published["key"]:
+        print("[FSM STATE]", out_state["state"], "| Advisory:", out_state["advisory"])
+    last_published.update(key=key, at=now)
+
+def on_connect(client, userdata, flags, rc, props=None):
+    if rc == 0:
+        client.subscribe("incubator/#", qos=1)
+    else:
+        print("[FSM] MQTT ditolak:", rc, "(cek username/password & ACL)")
 
 client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="fsm_gateway")
 client.username_pw_set(args.user, args.password)
+client.on_connect = on_connect
 client.on_message = on_message
 client.connect(args.broker, args.port, keepalive=10)
-client.subscribe("neo/#", qos=1)
-print("[FSM] Mendengarkan topik neo/# dan mem-publish ke neo/inc01/state...")
-client.loop_forever()
+client.loop_start()
+print(f"[FSM] Mendengarkan topik incubator/# dan mem-publish ke {TOPIC_FSM_STATE}...")
+
+# Evaluasi berkala agar timeout sensor (SENSOR_FAULT) tetap terdeteksi walau tidak ada pesan masuk
+try:
+    while True:
+        time.sleep(1.0)
+        publish_state(client)
+except KeyboardInterrupt:
+    client.loop_stop()

@@ -18,10 +18,10 @@ except ImportError:
 parser = argparse.ArgumentParser(description="NeoSentinel Raspberry Pi Two-Stage Audio Cry Detector")
 parser.add_argument("--broker", default="localhost")
 parser.add_argument("--port", type=int, default=1883)
-parser.add_argument("--user", default="audio_node")
-parser.add_argument("--password", default="PASSWORD")
+parser.add_argument("--user", default="cryservice")
+parser.add_argument("--password", default=os.environ.get("MQTT_PASSWORD", ""))
 parser.add_argument("--device", type=int, default=None)
-parser.add_argument("--sr-in", type=int, default=48000)
+parser.add_argument("--sr-in", type=int, default=untuk model tflite apsayaakah sudah 48000)
 parser.add_argument("--simulate", action="store_true")
 args = parser.parse_args()
 
@@ -52,71 +52,120 @@ inp2, out2 = it2.get_input_details()[0], it2.get_output_details()[0]
 s2_in, z2_in = inp2["quantization"]
 s2_out, z2_out = out2["quantization"]
 
-def analyze_window(w8k):
-    t0 = time.perf_counter()
-    lm = np.maximum(logmel(w8k[None, :]), FLOOR_DB)
+def window_logmel(w8k):
+    return np.maximum(logmel(w8k[None, :]), FLOOR_DB)
 
-    # Stage 1 Inference
+def run_stage1(lm):
+    """Tahap 1: tangisan atau bukan. Output softmax [non_cry, cry] -> P(cry)."""
     x1 = (lm - MEAN1) / STD1
     x1_q = np.clip(np.round(x1 / s1_in + z1_in), -128, 127).astype(np.int8)
     it1.set_tensor(inp1["index"], x1_q)
     it1.invoke()
     p1 = (it1.get_tensor(out1["index"]).astype(np.float32) - z1_out) * s1_out
-    p_cry = float(p1[0, 1])
+    return float(p1[0, 1])
 
-    # Stage 2 Inference (Advisory)
+def run_stage2(lm):
+    """Tahap 2: alasan tangisan (5 kelas, advisory). Hanya dipanggil untuk jendela tangisan."""
     x2 = (lm - MEAN2) / STD2
     x2_q = np.clip(np.round(x2 / s2_in + z2_in), -128, 127).astype(np.int8)
     it2.set_tensor(inp2["index"], x2_q)
     it2.invoke()
     p2 = (it2.get_tensor(out2["index"]).astype(np.float32) - z2_out) * s2_out
-    probs_reason = p2[0]
+    return p2[0]
 
-    infer_ms = (time.perf_counter() - t0) * 1000.0
-    return p_cry, probs_reason, infer_ms
+# Topic MQTT (sama dengan proyek smart-incubator / dashboard)
+TOPIC_RESULT = "incubator/cry/result"   # hasil tiap jendela
+TOPIC_STATE = "incubator/cry/state"     # status menangis (retained, hanya saat berubah)
+TOPIC_STATUS = "incubator/cry/status"   # online / offline (retained, Last Will)
+
+cry_state = {"crying": False, "since": None, "reason": "none"}
+
+def publish_state(p_cry=0.0, reason="none", reason_conf=0.0, reason_probs=None):
+    payload = {"crying": cry_state["crying"], "since": cry_state["since"],
+               "cry_prob": round(p_cry, 4), "reason": reason, "reason_conf": reason_conf,
+               "reason_probs": reason_probs or {}, "ts": time.time()}
+    client.publish(TOPIC_STATE, json.dumps(payload), qos=1, retain=True)
+
+def on_connect(client, userdata, flags, rc, props=None):
+    if rc == 0:
+        client.publish(TOPIC_STATUS, "online", qos=1, retain=True)
+        publish_state()
+    else:
+        print("[MQTT] Ditolak:", rc, "(cek username/password & ACL)")
 
 client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="audio_pi")
 client.username_pw_set(args.user, args.password)
-client.will_set("neo/inc01/audio_node/status", "offline", qos=1, retain=True)
+client.will_set(TOPIC_STATUS, "offline", qos=1, retain=True)
+client.on_connect = on_connect
 client.connect(args.broker, args.port, keepalive=10)
 client.loop_start()
-client.publish("neo/inc01/audio_node/status", "online", qos=1, retain=True)
 
 win_len = int(meta1.get("consecutive_windows", 3))
 scores = collections.deque(maxlen=win_len)
-reason_Buf = collections.deque(maxlen=win_len)
+# Probabilitas tahap 2 dari jendela-jendela tangisan terakhir (dirata-rata agar stabil)
+reason_Buf = collections.deque(maxlen=5)
 seq = 0
 
 def step_window(w):
     global seq
+    t0 = time.perf_counter()
+    is_silence = False
+    stage2_ran = False
     db = float(rms_dbfs(w[None, :])[0])
-    if db < SILENCE_DBFS:
-        p_val, r_probs, inf_ms = 0.0, np.zeros(5, dtype=np.float32), 0.0
-    else:
-        p_val, r_probs, inf_ms = analyze_window(w)
 
+    # ---- Tahap 1: tangisan atau bukan ----
+    if db < SILENCE_DBFS:
+        is_silence = True
+        p_val = 0.0          # hening -> model tidak dijalankan
+    else:
+        lm = window_logmel(w)
+        p_val = run_stage1(lm)
+    is_cry_win = bool(p_val >= THRESHOLD)
+
+    # ---- Tahap 2: alasan tangisan, HANYA jika jendela ini tangisan ----
+    if is_cry_win:
+        reason_Buf.append(run_stage2(lm))
+        stage2_ran = True
+    inf_ms = (time.perf_counter() - t0) * 1000.0
+
+    # Keputusan "menangis" = rata-rata P(cry) beberapa jendela berturut-turut >= ambang
     scores.append(p_val)
-    reason_Buf.append(r_probs)
     rule = float(np.mean(scores)) if len(scores) == scores.maxlen else 0.0
     is_crying = bool(rule >= THRESHOLD)
 
-    if is_crying:
+    reason_label, reason_conf, reason_probs = "none", 0.0, {}
+    if is_crying and reason_Buf:
         mean_r = np.mean(reason_Buf, axis=0)
         best_idx = int(np.argmax(mean_r))
         reason_label = REASON_LABELS[best_idx]
         reason_conf = round(float(mean_r[best_idx]), 3)
-    else:
-        reason_label = "none"
-        reason_conf = 0.0
+        reason_probs = {lbl: round(float(p), 3) for lbl, p in zip(REASON_LABELS, mean_r)}
+    elif not is_crying and not is_cry_win:
+        reason_Buf.clear()   # episode tangisan selesai -> mulai baru
 
     seq += 1
+    label = "silence" if is_silence else ("cry" if is_cry_win else "not_cry")
     payload = {
-        "dev": "pi", "ts": int(time.time()), "seq": seq,
+        "dev": "pi", "ts": time.time(), "seq": seq,
+        # field yang dibaca dashboard smart-incubator
+        "label": label, "confidence": round(p_val if is_cry_win else 1.0 - p_val, 3),
+        "cry_prob": round(p_val, 3), "level_db": round(db, 1),
+        "is_cry": is_cry_win, "latency_ms": round(inf_ms, 2),
+        # field asli NeoSentinel (dipakai fsm.py & mqtt_logger.py)
         "cry": is_crying, "p_cry": round(p_val, 3), "rule": round(rule, 3),
-        "reason": reason_label, "reason_conf": reason_conf,
+        "reason": reason_label, "reason_conf": reason_conf, "reason_probs": reason_probs,
+        "stage2_ran": stage2_ran,
         "db": round(db, 1), "infer_ms": round(inf_ms, 2)
     }
-    client.publish("neo/inc01/audio", json.dumps(payload), qos=0)
+    client.publish(TOPIC_RESULT, json.dumps(payload), qos=0)
+
+    # Status di-publish saat mulai/berhenti menangis, atau saat alasan tangisan berubah (retained)
+    if is_crying != cry_state["crying"] or (is_crying and reason_label != cry_state["reason"]):
+        if is_crying != cry_state["crying"]:
+            cry_state["since"] = time.time() if is_crying else None
+        cry_state["crying"] = is_crying
+        cry_state["reason"] = reason_label
+        publish_state(rule, reason_label, reason_conf, reason_probs)
     return payload
 
 if args.simulate:
