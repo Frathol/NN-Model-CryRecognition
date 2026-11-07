@@ -17,6 +17,7 @@
     <div class="pills">
       <span class="pill" id="pill-broker"><span class="dot"></span><span class="txt">Broker: connecting…</span></span>
       <span class="pill" id="pill-esp32"><span class="dot"></span><span class="txt">ESP32: —</span></span>
+      <span class="pill" id="pill-fsm"><span class="dot"></span><span class="txt">Status: —</span></span>
       <span class="pill" id="pill-cry"><span class="dot"></span><span class="txt">Cry service: —</span></span>
     </div>
   </header>
@@ -43,7 +44,7 @@
       <div class="meta">Humidity <strong id="v-sht-hum">—</strong> %RH</div>
     </article>
 
-    <article class="tile">
+    <article class="tile" id="tile-ntc">
       <h2>NTC temperature</h2>
       <div class="hero"><span id="v-ntc-temp">—</span><span class="unit">°C</span></div>
       <div class="meta">Skin / mattress probe</div>
@@ -55,10 +56,22 @@
       <div class="meta">Humidity <strong id="v-dht-hum">—</strong> %RH</div>
     </article>
 
-    <article class="tile">
+    <article class="tile" id="tile-heart">
       <h2>Heart rate</h2>
       <div class="hero"><span id="v-bpm">—</span><span class="unit">BPM</span></div>
       <div class="meta" id="v-contact">Sensor: —</div>
+    </article>
+
+    <article class="tile" id="tile-weight">
+      <h2>Baby weight</h2>
+      <div class="hero"><span id="v-weight">—</span><span class="unit">g</span></div>
+      <div class="meta" id="v-weight-info">Sensor: —</div>
+    </article>
+
+    <article class="tile" id="tile-power">
+      <h2>Power / battery</h2>
+      <div class="hero"><span id="v-soc">—</span><span class="unit">%</span></div>
+      <div class="meta" id="v-power-info">Mains: —</div>
     </article>
   </section>
 
@@ -71,9 +84,13 @@
       <figcaption>Humidity (%RH)</figcaption>
       <div class="chart-wrap"><canvas id="chart-hum" role="img" aria-label="Humidity chart: SHT31 and DHT11"></canvas></div>
     </figure>
-    <figure class="card">
+    <figure class="card" id="card-bpm">
       <figcaption>Heart rate (BPM)</figcaption>
       <div class="chart-wrap"><canvas id="chart-bpm" role="img" aria-label="Heart rate chart"></canvas></div>
+    </figure>
+    <figure class="card" id="card-weight">
+      <figcaption>Weight (g)</figcaption>
+      <div class="chart-wrap"><canvas id="chart-weight" role="img" aria-label="Baby weight chart"></canvas></div>
     </figure>
     <figure class="card">
       <figcaption>Crying probability</figcaption>

@@ -37,6 +37,7 @@ ditampilkan real-time di web dashboard.
 | MAX30102 | VIN / GND / SDA / SCL | 3V3 / GND / **GPIO17** / **GPIO18** |
 | DHT11 | VCC / DATA / GND | 3V3 / **GPIO4** (+ pull-up 10 kΩ ke 3V3 bila modul tanpa resistor) / GND |
 | NTC 10k | divider | `3V3 ── 10 kΩ ──┬── NTC ── GND`, titik tengah ke **GPIO1** |
+| HX711 + load cell | VCC / GND / DT / SCK | 3V3 / GND / **GPIO5** / **GPIO6** (load cell ke E+/E−/A+/A− modul HX711) |
 
 - NTC wajib di pin ADC1 (GPIO1–10): ADC2 tidak bisa dipakai saat WiFi aktif.
 - MAX30102 sengaja di bus I2C kedua supaya pembacaan detak jantung (100 Hz, di task FreeRTOS
@@ -150,7 +151,7 @@ Buka `http://<ip-pi>/` dari perangkat di jaringan yang sama. Batas alarm
 
 | Topic | Arah | Isi |
 |---|---|---|
-| `incubator/sensors` | ESP32 → | `{"ntc":{"temp"},"sht31":{"temp","hum"},"dht11":{"temp","hum"},"heart":{"bpm","contact","ir","sensor_ok"},"uptime_s","rssi"}` tiap 2 detik; nilai gagal = `null` |
+| `incubator/sensors` | ESP32 → | `{"ntc":{"temp"},"sht31":{"temp","hum"},"dht11":{"temp","hum"},"heart":{"bpm","contact","ir","sensor_ok"},"weight":{"g","raw","calibrated","sensor_ok"},"uptime_s","rssi"}` tiap 2 detik; nilai gagal = `null` |
 | `incubator/esp32/status` | ESP32 → | `online` / `offline` (retained, Last Will) |
 | `incubator/cry/result` | Pi → | `{"label","confidence","cry_prob","probabilities","level_db","is_cry","latency_ms","ts"}` tiap jendela |
 | `incubator/cry/state` | Pi → | `{"crying","since","cry_prob","ts"}` (retained, hanya saat berubah) |

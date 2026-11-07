@@ -43,8 +43,9 @@ while true; do
     bpm  = 135 + 12 * sin(2*pi*t/60) + (rand()-0.5)*4
     ir   = 80000 + int(rand()*5000)
     rssi = -50 - int(rand()*10)
-    printf "{\"ntc\":{\"temp\":%.2f},\"sht31\":{\"temp\":%.2f,\"hum\":%.2f},\"dht11\":{\"temp\":%.1f,\"hum\":%.1f},\"heart\":{\"bpm\":%d,\"contact\":true,\"ir\":%d,\"sensor_ok\":true},\"uptime_s\":%d,\"rssi\":%d}",
-           ntc, sT, sH, dT, dH, bpm, ir, t, rssi
+    wg   = 2850 + 4 * sin(2*pi*t/300) + (rand()-0.5)*3
+    printf "{\"ntc\":{\"temp\":%.2f},\"sht31\":{\"temp\":%.2f,\"hum\":%.2f},\"dht11\":{\"temp\":%.1f,\"hum\":%.1f},\"heart\":{\"bpm\":%d,\"contact\":true,\"ir\":%d,\"sensor_ok\":true},\"weight\":{\"g\":%.0f,\"raw\":%d,\"calibrated\":true,\"sensor_ok\":true},\"uptime_s\":%d,\"rssi\":%d}",
+           ntc, sT, sH, dT, dH, bpm, ir, wg, int(wg*277), t, rssi
   }')
   pub -t incubator/sensors -m "$json"
   echo "[$(date +%H:%M:%S)] $json"

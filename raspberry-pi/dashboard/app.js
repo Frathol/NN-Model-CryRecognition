@@ -13,6 +13,7 @@
     esp32: "unknown",
     cryService: "unknown",
     crying: false,
+    fsm: null,             // last fsm_state from ESP32
     alarms: new Map(),     // key -> {level, text}
   };
 
@@ -40,14 +41,15 @@
     while (tb.children.length > 50) tb.removeChild(tb.lastChild);
   }
 
-  function setAlarm(key, active, level, text) {
+  // log=false: banner is still shown, but not written to event log (logged elsewhere)
+  function setAlarm(key, active, level, text, log = true) {
     const had = state.alarms.has(key);
     if (active) {
       state.alarms.set(key, { level, text });
-      if (!had) addEvent(level === "critical" ? "ALARM" : "Warning", text);
+      if (!had && log) addEvent(level === "critical" ? "ALARM" : "Warning", text);
     } else if (had) {
       state.alarms.delete(key);
-      addEvent("Normal", text.split(":")[0] + " back to normal");
+      if (log) addEvent("Normal", text.split(":")[0] + " back to normal");
     }
     renderAlarms();
   }
@@ -96,7 +98,12 @@
       label: s.label, data: [], borderWidth: 2, pointRadius: 0, pointHoverRadius: 4,
       tension: 0.25, spanGaps: false, _colorVar: s.color,
     }));
-    return new Chart($(canvasId), {
+    const canvas = $(canvasId);
+    if (!canvas) {   // older index.html without this element -> skip without breaking dashboard
+      console.warn(`#${canvasId} missing in index.html, skipping chart`);
+      return null;
+    }
+    return new Chart(canvas, {
       type: "line",
       data: { datasets: ds },
       plugins: [crosshair],
@@ -134,6 +141,11 @@
     ], { suggestedMin: 30, suggestedMax: 90 });
     charts.bpm = makeChart("chart-bpm", [{ label: "BPM", color: "--series-1" }],
       { suggestedMin: 80, suggestedMax: 200, _decimals: 0 });
+    charts.weight = makeChart("chart-weight", [
+      { label: "Total", color: "--series-1" },
+      { label: "Left", color: "--series-2" },
+      { label: "Right", color: "--series-3" },
+    ], { _decimals: 0 });
     charts.cry = makeChart("chart-cry", [{ label: "P(cry)", color: "--series-1" }],
       { min: 0, max: 1, _decimals: 2 });
     applyTheme();
@@ -143,6 +155,7 @@
     Chart.defaults.font.family = 'system-ui, -apple-system, "Segoe UI", sans-serif';
     Chart.defaults.font.size = 11;
     for (const c of Object.values(charts)) {
+      if (!c) continue;
       c.data.datasets.forEach((d) => { d.borderColor = css(d._colorVar); d.backgroundColor = css(d._colorVar); });
       for (const ax of Object.values(c.options.scales)) {
         ax.grid = { color: css("--grid") };
@@ -155,6 +168,7 @@
   }
 
   function push(chart, idx, t, y) {
+    if (!chart) return;
     const d = chart.data.datasets[idx].data;
     d.push({ x: t, y: y === undefined ? null : y });
     while (d.length && d[0].x < t - HIST_MS) d.shift();
@@ -166,6 +180,7 @@
     dirty = false;
     const now = Date.now();
     for (const c of Object.values(charts)) {
+      if (!c) continue;
       c.options.scales.x.min = now - HIST_MS; c.options.scales.x.max = now;
       c.update("none");
     }
@@ -174,36 +189,105 @@
   // ------------------------------------------------------------------
   //  Message handlers
   // ------------------------------------------------------------------
+  // Show / hide tiles & charts depending on fields actually sent by ESP32
+  function show(id, visible) { const el = $(id); if (el) el.hidden = !visible; }
+
   function onSensors(m) {
     const t = Date.now();
     state.lastSensorAt = t;
+    const hasNtc = "ntc" in m, hasHeart = "heart" in m;
     const ntc = m.ntc?.temp ?? null;
     const shtT = m.sht31?.temp ?? null, shtH = m.sht31?.hum ?? null;
     const dhtT = m.dht11?.temp ?? null, dhtH = m.dht11?.hum ?? null;
     const bpm = m.heart?.bpm ?? null, contact = !!m.heart?.contact;
 
+    // --- Temperature & humidity --------------------------------------
+    show("tile-ntc", hasNtc);
     setText("v-ntc-temp", fmt(ntc));
     setText("v-sht-temp", fmt(shtT)); setText("v-sht-hum", fmt(shtH, 0));
     setText("v-dht-temp", fmt(dhtT)); setText("v-dht-hum", fmt(dhtH, 0));
-    setText("v-bpm", fmt(bpm, 0));
-    setText("v-contact", m.heart?.sensor_ok === false ? "Sensor: not detected"
-      : contact ? (bpm === null ? "Sensor attached · measuring…" : "Sensor attached")
-      : "Sensor not attached");
-
     push(charts.temp, 0, t, ntc); push(charts.temp, 1, t, shtT); push(charts.temp, 2, t, dhtT);
     push(charts.hum, 0, t, shtH); push(charts.hum, 1, t, dhtH);
-    push(charts.bpm, 0, t, bpm);
+
+    // --- Heart rate (only if firmware sends "heart") -----------------
+    show("tile-heart", hasHeart); show("card-bpm", hasHeart);
+    if (hasHeart) {
+      setText("v-bpm", fmt(bpm, 0));
+      setText("v-contact", m.heart.sensor_ok === false ? "Sensor: not detected"
+        : contact ? (bpm === null ? "Sensor attached · measuring…" : "Sensor attached")
+        : "Sensor not attached");
+      push(charts.bpm, 0, t, bpm);
+    }
+
+    // --- Weight: format {g} or {total_g, left_g, right_g} ------------
+    const w = m.weight;
+    const wg = w ? (w.g ?? w.total_g ?? null) : null;
+    show("tile-weight", !!w); show("card-weight", !!w);
+    if (w) {
+      setText("v-weight", fmt(wg, 0));
+      const info = [];
+      if (w.sensor_ok === false) info.push("Sensor: not detected");
+      else if (w.calibrated === false) info.push("Not calibrated");
+      if ("left_g" in w || "right_g" in w)
+        info.push(`Left ${fmt(w.left_g, 0)} g · Right ${fmt(w.right_g, 0)} g`);
+      setText("v-weight-info", info.join(" · ") || "Load cell + HX711");
+      push(charts.weight, 0, t, wg);
+      push(charts.weight, 1, t, w.left_g ?? null);
+      push(charts.weight, 2, t, w.right_g ?? null);
+    }
+
+    // --- Power / battery ---------------------------------------------
+    const pw = m.power;
+    show("tile-power", !!pw);
+    if (pw) {
+      const soc = pw.soc_pct ?? null;
+      setText("v-soc", fmt(soc, 0));
+      setText("v-power-info",
+        (pw.mains_ok === false ? "Mains power DISCONNECTED" : "Mains power OK")
+        + (pw.status ? ` · ${pw.status}` : ""));
+    }
+
+    // --- FSM state from ESP32 ----------------------------------------
+    if (typeof m.fsm_state === "string") onFsmState(m.fsm_state);
     dirty = true;
 
+    // --- Alarms ------------------------------------------------------
     // Primary temperature/humidity sensor = SHT31; DHT11 as fallback
     const temp = shtT ?? dhtT, hum = shtH ?? dhtH;
     checkRange("temp", "Temperature", temp, CFG.limits.temp, "°C", $("v-sht-temp").closest(".tile"));
     checkRange("hum", "Humidity", hum, CFG.limits.hum, "%RH", null);
-    if (contact) checkRange("bpm", "Heart rate", bpm, CFG.limits.bpm, "BPM", $("v-bpm").closest(".tile"), 0);
-    else checkRange("bpm", "Heart rate", null, CFG.limits.bpm, "BPM", $("v-bpm").closest(".tile"));
-    setAlarm("hr-contact", m.heart?.sensor_ok !== false && !contact, "warning",
+    checkRange("bpm", "Heart rate", hasHeart && contact ? bpm : null, CFG.limits.bpm, "BPM",
+      $("v-bpm").closest(".tile"), 0);
+    setAlarm("hr-contact", hasHeart && m.heart.sensor_ok !== false && !contact, "warning",
       "Heart rate sensor is not attached to the baby");
     setAlarm("sht-fail", shtT === null, "warning", "SHT31 is not returning data");
+    setAlarm("weight-fail", !!w && w.sensor_ok === false, "warning",
+      "Weight sensor (HX711) is not returning data");
+    if (pw) {
+      setAlarm("mains", pw.mains_ok === false, "warning",
+        "Mains power disconnected: system running on battery");
+      // 5% hysteresis to prevent chattering around threshold
+      const socMin = CFG.limits.soc?.min ?? 30;
+      const soc = pw.soc_pct ?? null;
+      const low = soc !== null && soc < (state.alarms.has("soc-low") ? socMin + 5 : socMin);
+      setAlarm("soc-low", low, "warning", `Low battery: ${fmt(soc, 0)}% (limit ${socMin}%)`);
+    }
+  }
+
+  // ESP32 FSM state: logged to event history EVERY time it changes
+  function fsmLevel(s) {
+    const u = s.toUpperCase();
+    if (/CRIT|ALARM|ALERT|HAZARD|FAULT|EMERG|BLUE/.test(u)) return "bad";
+    if (/WARN|CAUTION|CRY/.test(u)) return "warn";
+    return "ok";
+  }
+
+  function onFsmState(s) {
+    const prev = state.fsm;
+    if (s === prev) return;
+    state.fsm = s;
+    addEvent("ESP32 status", prev === null ? `Initial status: ${s}` : `${prev} → ${s}`);
+    setAlarm("fsm", fsmLevel(s) === "bad", "critical", `ESP32 reported status: ${s}`, false);
   }
 
   // Cry reason from the stage-2 model (sent only by audio_detector.py)
@@ -254,7 +338,7 @@
   }
 
   // ------------------------------------------------------------------
-  //  Status online / offline
+  //  Online / offline status
   // ------------------------------------------------------------------
   function refreshStatus() {
     const now = Date.now(), to = CFG.sensorTimeoutSec * 1000;
@@ -268,6 +352,10 @@
       now - state.lastCryAt < to ? "Cry service: online" : "Cry service: waiting for audio");
     else if (cs === "no_mic") setPill("pill-cry", "warn", "Cry service: mic disconnected");
     else setPill("pill-cry", "bad", `Cry service: ${cs === "unknown" ? "—" : cs}`);
+
+    if (state.fsm === null) setPill("pill-fsm", null, "Status: —");
+    else if (!espFresh) setPill("pill-fsm", null, `Status: ${state.fsm} (stale)`);
+    else setPill("pill-fsm", fsmLevel(state.fsm), `Status: ${state.fsm}`);
 
     setAlarm("esp-offline", state.esp32 !== "unknown" && !espFresh, "warning",
       "ESP32 sensor node is not sending data");

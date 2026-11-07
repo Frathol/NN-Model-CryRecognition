@@ -1,6 +1,7 @@
 // =====================================================================
 //  Smart Incubator - ESP32-S3 sensor node
-//  Sensor : NTC (ADC), SHT31 (I2C0), DHT11 (1-wire), MAX30102 (I2C1)
+//  Sensor : NTC (ADC), SHT31 (I2C0), DHT11 (1-wire), MAX30102 (I2C1),
+//           load cell + HX711 (berat)
 //  Output : JSON ke MQTT topic incubator/sensors setiap PUBLISH_INTERVAL_MS
 // =====================================================================
 #include <Arduino.h>
@@ -12,6 +13,8 @@
 #include <DHT.h>
 #include <MAX30105.h>     // SparkFun library, kompatibel MAX30102
 #include <heartRate.h>    // algoritma deteksi detak (PBA) dari SparkFun
+#include <HX711.h>
+#include <Preferences.h>  // simpan tare & kalibrasi di flash (NVS)
 
 #include "config.h"
 
@@ -111,6 +114,88 @@ void heartRateTask(void*) {
 }
 
 // ---------------------------------------------------------------------
+//  Berat: load cell + HX711. Dibaca non-blocking di loop() (~10 sampel/detik)
+//  lalu dirata-rata WEIGHT_AVG_SIZE sampel. Offset (tare) dan faktor
+//  kalibrasi disimpan di flash sehingga tetap ada setelah restart.
+// ---------------------------------------------------------------------
+HX711       scale;
+Preferences scalePrefs;
+long     wBuf[WEIGHT_AVG_SIZE];
+uint8_t  wIdx = 0, wCount = 0;
+uint32_t wLastSample = 0;
+long     wOffset = 0;       // nilai mentah saat timbangan kosong
+float    wFactor = 0.0f;    // nilai mentah per gram (0 = belum dikalibrasi)
+
+bool scaleOk() { return wCount > 0 && millis() - wLastSample < 1000; }
+
+long scaleRaw() {
+  if (wCount == 0) return 0;
+  int64_t s = 0;
+  for (uint8_t i = 0; i < wCount; i++) s += wBuf[i];
+  return (long)(s / wCount);
+}
+
+float scaleGrams() {
+  if (!scaleOk() || wFactor == 0.0f) return NAN;
+  return (float)(scaleRaw() - wOffset) / wFactor;
+}
+
+void initScale() {
+  scale.begin(HX711_DOUT_PIN, HX711_SCK_PIN);   // channel A, gain 128
+  scalePrefs.begin("scale", false);
+  wOffset = scalePrefs.getLong("offset", 0);
+  wFactor = scalePrefs.getFloat("factor", 0.0f);
+  bool found = scale.wait_ready_timeout(1000);
+  Serial.printf("[HX711] %s, offset=%ld, faktor=%.3f%s\n",
+                found ? "OK" : "TIDAK TERDETEKSI", wOffset, wFactor,
+                wFactor == 0.0f ? "  -> BELUM DIKALIBRASI: ketik 't', lalu 'c <gram>'" : "");
+}
+
+void sampleScale() {
+  if (!scale.is_ready()) return;
+  wBuf[wIdx] = scale.read();
+  wIdx = (wIdx + 1) % WEIGHT_AVG_SIZE;
+  if (wCount < WEIGHT_AVG_SIZE) wCount++;
+  wLastSample = millis();
+}
+
+// Perintah Serial Monitor: t | c <gram> | w
+void handleSerial() {
+  static String line;
+  while (Serial.available()) {
+    char ch = (char)Serial.read();
+    if (ch != '\r' && ch != '\n') { if (line.length() < 32) line += ch; continue; }
+    line.trim();
+    if (line.length() == 0) continue;
+
+    if (line == "t") {
+      if (!scaleOk()) Serial.println("[HX711] tidak ada data, cek wiring");
+      else {
+        wOffset = scaleRaw();
+        scalePrefs.putLong("offset", wOffset);
+        Serial.printf("[HX711] tare OK, offset=%ld\n", wOffset);
+      }
+    } else if (line.startsWith("c ")) {
+      float g = line.substring(2).toFloat();
+      long  d = scaleRaw() - wOffset;
+      if (!scaleOk() || g <= 0) Serial.println("[HX711] format: c <gram>, mis. c 500");
+      else if (labs(d) < 1000)  Serial.println("[HX711] beban tidak terbaca. Sudah 't' saat kosong, lalu beban diletakkan?");
+      else {
+        wFactor = (float)d / g;
+        scalePrefs.putFloat("factor", wFactor);
+        Serial.printf("[HX711] kalibrasi OK, faktor=%.3f\n", wFactor);
+      }
+    } else if (line == "w") {
+      Serial.printf("[HX711] raw=%ld offset=%ld faktor=%.3f berat=%.1f g\n",
+                    scaleRaw(), wOffset, wFactor, scaleGrams());
+    } else {
+      Serial.println("Perintah: t (tare) | c <gram> (kalibrasi) | w (lihat berat)");
+    }
+    line = "";
+  }
+}
+
+// ---------------------------------------------------------------------
 //  WiFi & MQTT (non-blocking reconnect)
 // ---------------------------------------------------------------------
 void ensureWifi() {
@@ -163,6 +248,9 @@ void initSensors() {
     xTaskCreatePinnedToCore(heartRateTask, "hr", 4096, nullptr, 2, nullptr, 1);
   }
   Serial.printf("[MAX30102] %s\n", hrOk ? "OK" : "TIDAK TERDETEKSI");
+
+  // Load cell + HX711
+  initScale();
 }
 
 void publishSensors() {
@@ -197,6 +285,12 @@ void publishSensors() {
   heart["ir"]      = hr.ir;
   heart["sensor_ok"] = hrOk;
 
+  JsonObject wt = root["weight"].to<JsonObject>();
+  putNum(wt, "g", scaleGrams(), 0);
+  wt["raw"]        = scaleRaw();
+  wt["calibrated"] = wFactor != 0.0f;
+  wt["sensor_ok"]  = scaleOk();
+
   root["uptime_s"] = millis() / 1000;
   root["rssi"]     = WiFi.RSSI();
 
@@ -226,6 +320,8 @@ void loop() {
   ensureWifi();
   ensureMqtt();
   mqtt.loop();
+  sampleScale();
+  handleSerial();
 
   static uint32_t lastPub = 0;
   if (millis() - lastPub >= PUBLISH_INTERVAL_MS) {

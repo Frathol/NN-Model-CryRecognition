@@ -48,3 +48,13 @@
 #define HR_IR_FINGER_THRESHOLD 50000   // nilai IR di bawah ini = sensor tidak menempel
 #define HR_AVG_SIZE            4       // rata-rata BPM dari N detak terakhir
 #define HR_SAMPLE_RATE_HZ      100     // = sampleRate(400) / sampleAverage(4)
+
+// ---------- Load cell + HX711 (berat bayi) ----------
+// Wiring HX711: VCC -> 3V3, GND -> GND, DT -> HX711_DOUT_PIN, SCK -> HX711_SCK_PIN
+// Kalibrasi lewat Serial Monitor (tidak perlu flash ulang, tersimpan di flash):
+//   t        = tare / nol-kan (timbangan harus KOSONG)
+//   c 500    = kalibrasi, setelah beban acuan 500 g diletakkan
+//   w        = tampilkan nilai mentah, offset, faktor, dan berat
+#define HX711_DOUT_PIN   5
+#define HX711_SCK_PIN    6
+#define WEIGHT_AVG_SIZE  10    // rata-rata N sampel terakhir (HX711 10 SPS = 1 detik)
