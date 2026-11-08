@@ -19,6 +19,11 @@ audio:
   channels: 1
 
 model:
+  # two_stage = model NN-Model-CryRecognition (tahap 1 tangisan + tahap 2 alasan),
+  #             preprocessing dari features.py; bagian "features:" di bawah DIABAIKAN.
+  # hapus baris ini untuk kembali ke CryModel generik (librosa, pakai "features:")
+  type: two_stage
+  dir: model                   # berisi cry_model.tflite, stage1_norm.json, stage2_*
   path: model/cry_model.tflite
   labels: labels.txt           # satu label per baris, URUTAN = urutan output model
   positive_label: cry          # label yang dianggap "menangis"
@@ -42,9 +47,11 @@ features:
   power_to_db: true   # melspec -> librosa.power_to_db(S, ref=np.max)
   normalize: none     # none | standardize | minmax  (per-sampel)
 
+# Nilai di bawah mengikuti model 2 tahap (model/stage1_norm.json):
+# jendela 1 dtk geser 0,5 dtk, hening < -50 dBFS, ambang 0,85, 3 jendela berturut-turut.
 inference:
-  hop_seconds: 1.0         # jalankan inferensi tiap N detik (jendela bergeser)
-  silence_db: -55          # di bawah level ini dianggap hening, inferensi dilewati
-  cry_threshold: 0.60      # probabilitas minimum dianggap menangis
-  consecutive_for_alert: 2 # jumlah jendela berturut-turut sebelum status "menangis"
-  clear_after: 3           # jumlah jendela non-cry sebelum status kembali tenang
+  hop_seconds: 0.5         # jalankan inferensi tiap N detik (jendela bergeser)
+  silence_db: -50          # di bawah level ini dianggap hening, inferensi dilewati
+  cry_threshold: 0.85      # probabilitas minimum dianggap menangis (tahap 2 jalan di atas ini)
+  consecutive_for_alert: 3 # jumlah jendela berturut-turut sebelum status "menangis"
+  clear_after: 2           # jumlah jendela non-cry sebelum status kembali tenang
