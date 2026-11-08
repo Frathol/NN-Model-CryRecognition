@@ -141,7 +141,12 @@ TensorFlow tambahan (Flex/SELECT_TF_OPS), install `tensorflow` di venv sebagai g
 
 ## 6. Dashboard
 
-Buka `http://<ip-pi>/` dari perangkat di jaringan yang sama. Batas alarm
+Buka `http://<ip-pi>/` dari perangkat di jaringan yang sama. Halaman pertama adalah
+**login**: masukkan akun MQTT (biasanya `dashboard`, password yang dibuat saat
+`setup_pi.sh`). Mosquitto yang memeriksa password, jadi password tidak lagi disimpan
+di `config.js`. Centang "Keep me signed in" agar tidak perlu login ulang di perangkat itu.
+Setelah memperbarui file dashboard, salin ulang ke Pi:
+`sudo cp -r raspberry-pi/dashboard/. /var/www/smart-incubator/`. Batas alarm
 (suhu, kelembapan, BPM) diatur di `/var/www/smart-incubator/config.js`
 (sumbernya `raspberry-pi/dashboard/config.js`).
 

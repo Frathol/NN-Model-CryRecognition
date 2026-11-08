@@ -68,9 +68,8 @@ sudo cp -r "$PI_DIR/dashboard/." "$WEB_ROOT/"
 # Simpan library JS secara lokal agar dashboard tetap jalan tanpa internet
 sudo curl -fsSL -o "$WEB_ROOT/vendor/mqtt.min.js"   https://unpkg.com/mqtt@5/dist/mqtt.min.js   || echo "(gagal unduh mqtt.js, dashboard akan memakai CDN)"
 sudo curl -fsSL -o "$WEB_ROOT/vendor/chart.umd.js"  https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.js || echo "(gagal unduh Chart.js, dashboard akan memakai CDN)"
-# Isi password dashboard (akun read-only) ke config.js
-ESC_DASH=$(printf '%s' "$P_DASH" | sed -e 's/[\/&|\\]/\\&/g')
-sudo sed -i "s|__DASHBOARD_PASSWORD__|$ESC_DASH|" "$WEB_ROOT/config.js"
+# Password dashboard TIDAK ditulis ke config.js: pengguna login di login.html
+# memakai akun MQTT (mis. "dashboard"), dan Mosquitto yang memeriksanya.
 
 sudo install -m 644 "$PI_DIR/nginx/smart-incubator.conf" /etc/nginx/sites-available/smart-incubator
 sudo ln -sf /etc/nginx/sites-available/smart-incubator /etc/nginx/sites-enabled/smart-incubator

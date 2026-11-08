@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light only">
+  <title>Sign in · Smart Incubator</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="login-page">
+  <section class="login" aria-labelledby="login-title">
+    <p class="brand-mark">Smart Incubator</p>
+    <h1 id="login-title">Sign in to the monitor</h1>
+    <p class="lead">Live readings, cry detection and the camera are shown after the broker accepts your account.</p>
+
+    <form id="login-form" novalidate>
+      <p class="notice" id="notice" role="status" aria-live="polite"></p>
+
+      <div class="field">
+        <label for="username">Username</label>
+        <input id="username" name="username" type="text" autocomplete="username"
+               autocapitalize="none" spellcheck="false" required aria-describedby="username-hint">
+        <p class="field-hint" id="username-hint" hidden>Enter a username.</p>
+      </div>
+
+      <div class="field">
+        <label for="password">Password</label>
+        <div class="input-row">
+          <input id="password" name="password" type="password" autocomplete="current-password"
+                 required aria-describedby="password-hint">
+          <button type="button" class="reveal" id="reveal" aria-controls="password" aria-pressed="false">Show</button>
+        </div>
+        <p class="field-hint" id="password-hint" hidden>Enter the password.</p>
+      </div>
+
+      <label class="check" for="remember">
+        <input type="checkbox" id="remember" name="remember">
+        Keep me signed in on this device
+      </label>
+
+      <button type="submit" class="btn primary" id="submit">Sign in</button>
+    </form>
+
+    <p class="note">Use the MQTT account created by <code>setup_pi.sh</code>. The <code>dashboard</code> account can only read data, it cannot control the incubator.</p>
+  </section>
+</main>
+
+<script src="config.js"></script>
+<script src="auth.js"></script>
+<!-- Local library (downloaded by setup_pi.sh); falls back to CDN if missing -->
+<script src="vendor/mqtt.min.js"></script>
+<script>window.mqtt || document.write('<script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js"><\/script>')</script>
+<script src="login.js"></script>
+</body>
+</html>

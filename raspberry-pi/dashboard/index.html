@@ -4,117 +4,217 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light only">
-  <title>Smart Incubator — Dashboard</title>
+  <title>Incubator Monitor · Smart Incubator</title>
+  <link rel="icon" href="data:,">
+  <script src="auth.js"></script>
+  <script>if (!window.IncubatorAuth.get()) location.replace("login.html");</script>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<div class="viz-root">
+<div class="shell viz-root">
   <header class="topbar">
     <div>
-      <h1>Smart Incubator</h1>
-      <p class="sub">Real-time monitoring · <span id="clock">--:--:--</span></p>
+      <h1 class="brand-mark">Smart Incubator</h1>
+      <p class="sub">Bedside monitor · <time id="clock">--:--:--</time></p>
     </div>
-    <div class="pills">
-      <span class="pill" id="pill-broker"><span class="dot"></span><span class="txt">Broker: connecting…</span></span>
-      <span class="pill" id="pill-esp32"><span class="dot"></span><span class="txt">ESP32: —</span></span>
-      <span class="pill" id="pill-fsm"><span class="dot"></span><span class="txt">Status: —</span></span>
-      <span class="pill" id="pill-cry"><span class="dot"></span><span class="txt">Cry service: —</span></span>
+    <div class="account">
+      <span>Signed in as <strong id="account-name">--</strong></span>
+      <button type="button" class="btn small" id="sign-out">Sign out</button>
     </div>
   </header>
 
-  <div id="alarms" class="alarms" aria-live="assertive"></div>
-
-  <section class="tiles">
-    <article class="tile tile-cry" id="tile-cry">
-      <h2>Baby status</h2>
-      <div class="cry-face" id="cry-icon" aria-hidden="true">🙂</div>
-      <div class="hero" id="cry-label">Waiting for data…</div>
-      <div class="meta"><span id="cry-prob">P(cry) —</span> · <span id="cry-level">Level — dB</span></div>
-      <div class="meter" aria-hidden="true"><div id="cry-bar"></div></div>
-      <div class="meta small" id="cry-since"></div>
-      <div class="cry-reason" id="cry-reason" hidden>
-        <div class="meta">Possible cause: <strong id="cry-reason-label">—</strong> <span id="cry-reason-conf"></span></div>
-        <div class="meta small">Stage-2 model estimate, not a diagnosis.</div>
+  <main>
+    <!-- Focal point: is everything all right, and if not, what needs attention -->
+    <section class="overview" id="overview" data-level="idle" aria-labelledby="overall-state">
+      <div class="overall">
+        <p class="kicker">Incubator status</p>
+        <h2 class="overall-state" id="overall-state"><span class="sig" aria-hidden="true"></span><span id="overall-text">Connecting</span></h2>
+        <p class="overall-detail" id="overall-detail">Connecting to the broker on the Raspberry Pi.</p>
       </div>
-    </article>
+      <div class="overview-side">
+        <ul class="alarm-list" id="alarms" aria-live="assertive" aria-label="Active alarms"></ul>
+        <ul class="links" aria-label="System connections">
+          <li class="link" id="pill-broker"><span class="dot" aria-hidden="true"></span><span class="lbl">Broker</span><span class="txt">connecting</span></li>
+          <li class="link" id="pill-esp32"><span class="dot" aria-hidden="true"></span><span class="lbl">Sensor node</span><span class="txt">waiting</span></li>
+          <li class="link" id="pill-fsm"><span class="dot" aria-hidden="true"></span><span class="lbl">Node state</span><span class="txt">not reported</span></li>
+          <li class="link" id="pill-cry"><span class="dot" aria-hidden="true"></span><span class="lbl">Cry detection</span><span class="txt">waiting</span></li>
+        </ul>
+      </div>
+    </section>
 
-    <article class="tile">
-      <h2>Air temperature (SHT31)</h2>
-      <div class="hero"><span id="v-sht-temp">—</span><span class="unit">°C</span></div>
-      <div class="meta">Humidity <strong id="v-sht-hum">—</strong> %RH</div>
-    </article>
+    <section aria-labelledby="vitals-title">
+      <div class="section-head">
+        <h2 id="vitals-title">Current readings</h2>
+        <p id="last-update">No reading received yet</p>
+      </div>
+      <div class="vitals">
+        <article class="vital" id="tile-temp">
+          <h3>Air temperature <span class="src">SHT31</span></h3>
+          <p class="reading"><span class="num" id="v-sht-temp">--</span><span class="unit">°C</span><span class="flag" id="flag-temp" hidden></span></p>
+          <div class="range" id="range-temp">
+            <div class="range-track"><div class="range-band"></div><div class="range-mark" hidden></div></div>
+            <div class="range-scale"><span class="lo"></span><span class="mid">limits</span><span class="hi"></span></div>
+          </div>
+          <p class="meta muted">Backup DHT11: <span id="v-dht-temp">--</span> °C</p>
+        </article>
 
-    <article class="tile" id="tile-ntc">
-      <h2>NTC temperature</h2>
-      <div class="hero"><span id="v-ntc-temp">—</span><span class="unit">°C</span></div>
-      <div class="meta">Skin / mattress probe</div>
-    </article>
+        <article class="vital" id="tile-hum">
+          <h3>Humidity <span class="src">SHT31</span></h3>
+          <p class="reading"><span class="num" id="v-sht-hum">--</span><span class="unit">%RH</span><span class="flag" id="flag-hum" hidden></span></p>
+          <div class="range" id="range-hum">
+            <div class="range-track"><div class="range-band"></div><div class="range-mark" hidden></div></div>
+            <div class="range-scale"><span class="lo"></span><span class="mid">limits</span><span class="hi"></span></div>
+          </div>
+          <p class="meta muted">Backup DHT11: <span id="v-dht-hum">--</span> %RH</p>
+        </article>
 
-    <article class="tile">
-      <h2>DHT11</h2>
-      <div class="hero"><span id="v-dht-temp">—</span><span class="unit">°C</span></div>
-      <div class="meta">Humidity <strong id="v-dht-hum">—</strong> %RH</div>
-    </article>
+        <article class="vital vital-cry" id="tile-cry">
+          <h3>Crying <span class="src" id="cry-source">microphone</span></h3>
+          <p class="reading"><span class="num" id="cry-label">Waiting for audio</span></p>
+          <div class="meter" role="meter" aria-label="Crying probability" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="cry-meter"><div id="cry-bar"></div></div>
+          <p class="meta"><span id="cry-prob">Crying probability --</span> · <span id="cry-level">Sound level -- dB</span></p>
+          <p class="meta muted" id="cry-since"></p>
+          <div class="cry-reason" id="cry-reason" hidden>
+            <p>Possible cause: <strong id="cry-reason-label">--</strong> <span id="cry-reason-conf"></span></p>
+            <p class="meta muted">Estimate from the second-stage model, not a diagnosis.</p>
+          </div>
+        </article>
 
-    <article class="tile" id="tile-heart">
-      <h2>Heart rate</h2>
-      <div class="hero"><span id="v-bpm">—</span><span class="unit">BPM</span></div>
-      <div class="meta" id="v-contact">Sensor: —</div>
-    </article>
+        <article class="vital" id="tile-weight" hidden>
+          <h3>Weight <span class="src">HX711</span></h3>
+          <p class="reading"><span class="num" id="v-weight">--</span><span class="unit">g</span></p>
+          <p class="meta" id="v-weight-info">Load cells</p>
+        </article>
 
-    <article class="tile" id="tile-weight">
-      <h2>Baby weight</h2>
-      <div class="hero"><span id="v-weight">—</span><span class="unit">g</span></div>
-      <div class="meta" id="v-weight-info">Sensor: —</div>
-    </article>
+        <article class="vital" id="tile-power" hidden>
+          <h3>Power <span class="src" id="v-power-src">--</span></h3>
+          <p class="reading"><span class="num" id="v-soc">--</span><span class="unit">% battery</span></p>
+          <div class="range battery" id="range-soc">
+            <div class="range-track"><div class="range-fill"></div></div>
+            <div class="range-scale"><span>0%</span><span id="soc-limit"></span><span>100%</span></div>
+          </div>
+          <p class="meta" id="v-power-info">Mains: --</p>
+        </article>
 
-    <article class="tile" id="tile-power">
-      <h2>Power / battery</h2>
-      <div class="hero"><span id="v-soc">—</span><span class="unit">%</span></div>
-      <div class="meta" id="v-power-info">Mains: —</div>
-    </article>
-  </section>
+        <article class="vital" id="tile-heart" hidden>
+          <h3>Heart rate <span class="src">MAX30102</span></h3>
+          <p class="reading"><span class="num" id="v-bpm">--</span><span class="unit">BPM</span><span class="flag" id="flag-bpm" hidden></span></p>
+          <div class="range" id="range-bpm">
+            <div class="range-track"><div class="range-band"></div><div class="range-mark" hidden></div></div>
+            <div class="range-scale"><span class="lo"></span><span class="mid">limits</span><span class="hi"></span></div>
+          </div>
+          <p class="meta" id="v-contact">Sensor: --</p>
+        </article>
 
-  <section class="charts">
-    <figure class="card">
-      <figcaption>Temperature (°C)</figcaption>
-      <div class="chart-wrap"><canvas id="chart-temp" role="img" aria-label="Temperature chart: NTC, SHT31, DHT11"></canvas></div>
-    </figure>
-    <figure class="card">
-      <figcaption>Humidity (%RH)</figcaption>
-      <div class="chart-wrap"><canvas id="chart-hum" role="img" aria-label="Humidity chart: SHT31 and DHT11"></canvas></div>
-    </figure>
-    <figure class="card" id="card-bpm">
-      <figcaption>Heart rate (BPM)</figcaption>
-      <div class="chart-wrap"><canvas id="chart-bpm" role="img" aria-label="Heart rate chart"></canvas></div>
-    </figure>
-    <figure class="card" id="card-weight">
-      <figcaption>Weight (g)</figcaption>
-      <div class="chart-wrap"><canvas id="chart-weight" role="img" aria-label="Baby weight chart"></canvas></div>
-    </figure>
-    <figure class="card">
-      <figcaption>Crying probability</figcaption>
-      <div class="chart-wrap"><canvas id="chart-cry" role="img" aria-label="Crying probability chart"></canvas></div>
-    </figure>
-  </section>
+        <article class="vital" id="tile-ntc" hidden>
+          <h3>Skin temperature <span class="src">NTC</span></h3>
+          <p class="reading"><span class="num" id="v-ntc-temp">--</span><span class="unit">°C</span></p>
+          <p class="meta muted">Skin / mattress probe</p>
+        </article>
+      </div>
+    </section>
 
-  <section class="card log">
-    <h2>Event log</h2>
-    <table>
-      <thead><tr><th>Time</th><th>Event</th><th>Details</th></tr></thead>
-      <tbody id="events"></tbody>
-    </table>
-  </section>
+    <section aria-labelledby="trends-title">
+      <div class="section-head">
+        <h2 id="trends-title">Trends</h2>
+        <p id="trends-span">Last 10 minutes, since this page was opened</p>
+      </div>
+      <div class="charts">
+        <figure class="panel">
+          <figcaption>Temperature (°C)</figcaption>
+          <div class="chart-wrap">
+            <canvas id="chart-temp" role="img" aria-label="Temperature over time from the NTC, SHT31 and DHT11 sensors"></canvas>
+            <p class="chart-empty">Waiting for the first reading from the sensor node.</p>
+          </div>
+        </figure>
+        <figure class="panel">
+          <figcaption>Humidity (%RH)</figcaption>
+          <div class="chart-wrap">
+            <canvas id="chart-hum" role="img" aria-label="Humidity over time from the SHT31 and DHT11 sensors"></canvas>
+            <p class="chart-empty">Waiting for the first reading from the sensor node.</p>
+          </div>
+        </figure>
+        <figure class="panel">
+          <figcaption>Crying probability</figcaption>
+          <div class="chart-wrap">
+            <canvas id="chart-cry" role="img" aria-label="Crying probability over time"></canvas>
+            <p class="chart-empty">Waiting for the cry detector. Audio below the silence level is shown as 0.</p>
+          </div>
+        </figure>
+        <figure class="panel" id="card-weight" hidden>
+          <figcaption>Weight (g)</figcaption>
+          <div class="chart-wrap">
+            <canvas id="chart-weight" role="img" aria-label="Weight over time: total, left and right load cell"></canvas>
+            <p class="chart-empty">Waiting for the first weight reading.</p>
+          </div>
+        </figure>
+        <figure class="panel" id="card-bpm" hidden>
+          <figcaption>Heart rate (BPM)</figcaption>
+          <div class="chart-wrap">
+            <canvas id="chart-bpm" role="img" aria-label="Heart rate over time"></canvas>
+            <p class="chart-empty">Waiting for a heart rate reading. The sensor must touch the baby's skin.</p>
+          </div>
+        </figure>
+      </div>
+    </section>
 
-  <footer>Not a certified medical device. Always verify with a direct check.</footer>
+    <section class="panel" id="camera" aria-labelledby="cam-title">
+      <div class="camera-head">
+        <h2 id="cam-title">Camera</h2>
+        <div class="camera-actions">
+          <span class="rec-badge" id="cam-rec-badge" hidden>Recording <time id="cam-rec-time">00:00</time></span>
+          <button type="button" class="btn" id="cam-toggle" aria-pressed="false">Watch live</button>
+          <button type="button" class="btn btn-rec" id="cam-record">Start recording</button>
+        </div>
+      </div>
+      <div class="cam-view" id="cam-view" hidden>
+        <img id="cam-img" alt="Live camera view of the incubator" width="1280" height="720">
+        <div class="cam-msg" id="cam-msg"></div>
+      </div>
+      <p class="cam-status" id="cam-status">The camera is off. Press “Watch live” to see the incubator. The camera may ask for its own password.</p>
+      <div class="cam-player" id="cam-player" hidden>
+        <div class="camera-head">
+          <span class="meta" id="cam-player-name"></span>
+          <button type="button" class="btn small" id="cam-player-close">Close player</button>
+        </div>
+        <video id="cam-video" controls playsinline preload="metadata" width="1280" height="720"></video>
+      </div>
+      <details class="cam-recs" id="cam-recs">
+        <summary>Saved recordings (<span id="cam-rec-count">open to load</span>)</summary>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th scope="col">Recorded at</th><th scope="col">Size</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
+            <tbody id="cam-rec-list"></tbody>
+          </table>
+        </div>
+        <p class="empty" id="cam-rec-empty" hidden>No recordings saved yet. Press “Start recording” to make one.</p>
+      </details>
+    </section>
+
+    <section class="panel" aria-labelledby="log-title">
+      <div class="section-head">
+        <h2 id="log-title">Event log</h2>
+        <p>Last 50 events since this page was opened</p>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th scope="col">Time</th><th scope="col">Event</th><th scope="col">Details</th></tr></thead>
+          <tbody id="events"></tbody>
+        </table>
+      </div>
+      <p class="empty" id="events-empty">No events yet. Alarms, state changes and camera actions appear here.</p>
+    </section>
+  </main>
+
+  <footer>Smart Incubator is a monitoring aid, not a certified medical device. Always check the baby directly.</footer>
 </div>
 
 <script src="config.js"></script>
-<!-- Local libraries (downloaded by setup_pi.sh); falls back to CDN if missing -->
+<!-- Local libraries (downloaded by setup_pi.sh); fall back to CDN if missing -->
 <script src="vendor/mqtt.min.js"></script>
-<script>window.mqtt || document.write('<script src="https://unpkg.com/mqtt@5/dist/mqtt.min.js"><\/script>')</script>
+<script>window.mqtt || document.write('<script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js"><\/script>')</script>
 <script src="vendor/chart.umd.js"></script>
-<script>window.Chart || document.write('<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.js"><\/script>')</script>
+<script>window.Chart || document.write('<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.js"><\/script>')</script>
 <script src="app.js"></script>
 </body>
 </html>

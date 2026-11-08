@@ -1,10 +1,12 @@
-// Konfigurasi dashboard Smart Incubator
+// Smart Incubator dashboard configuration
 window.DASHBOARD_CONFIG = {
-  // MQTT over WebSockets lewat nginx (ws://<ip-pi>/mqtt). Tidak perlu diubah
-  // bila dashboard dibuka dari Raspberry Pi itu sendiri.
+  // MQTT over WebSockets through nginx (ws://<pi-ip>/mqtt). No change needed
+  // when the dashboard is served by the Raspberry Pi itself.
   mqttUrl: (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/mqtt",
-  username: "dashboard",                 // akun READ-ONLY (lihat ACL Mosquitto)
-  password: "",    // diisi otomatis oleh setup_pi.sh
+
+  // Pre-filled on the sign-in page. The password is never stored in this file:
+  // users type it on login.html and the broker checks it.
+  defaultUsername: "dashboard",
 
   topics: {
     sensors:    "incubator/sensors",
@@ -14,13 +16,14 @@ window.DASHBOARD_CONFIG = {
     cryStatus:  "incubator/cry/status",
   },
 
-  historyMinutes: 10,        // panjang data pada grafik
-  sensorTimeoutSec: 10,      // tanpa data selama ini -> sensor dianggap offline
+  historyMinutes: 10,        // time span shown on the trend charts
+  sensorTimeoutSec: 10,      // no data for this long -> sensor node treated as offline
 
-  // Batas alarm — SESUAIKAN dengan protokol klinis / rekomendasi dokter.
+  // Alarm limits. ADJUST to the clinical protocol / doctor's recommendation.
   limits: {
-    temp: { min: 32.0, max: 37.5 },   // °C suhu udara inkubator (sensor utama: SHT31)
+    temp: { min: 32.0, max: 37.5 },   // °C incubator air temperature (primary sensor: SHT31)
     hum:  { min: 40,   max: 80 },     // %RH
-    bpm:  { min: 100,  max: 180 },    // detak jantung neonatus
+    bpm:  { min: 100,  max: 180 },    // neonatal heart rate
+    soc:  { min: 30 },                // % battery, warning below this
   },
 };
