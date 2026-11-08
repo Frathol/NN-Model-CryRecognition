@@ -5,6 +5,12 @@ ESC-50/
 __pycache__/
 *.pyc
 
+# PlatformIO & IDE build artifacts
+.pio/
+.vscode/
+*.swp
+*.swo
+
 # File uji lokal (foto/video kamera, rekaman audio, log eksperimen)
 raspberry-pi/*.jpg
 raspberry-pi/*.h264
@@ -12,6 +18,8 @@ raspberry-pi/*.mp4
 raspberry-pi/cry-recognition/*.wav
 raspberry-pi/scripts/mqtt_csv/
 eksperimen_log.csv
+*.log
 
 # Backup lokal sebelum perubahan (jangan di-commit)
 backup/
+
