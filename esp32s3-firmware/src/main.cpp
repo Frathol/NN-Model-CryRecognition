@@ -1,9 +1,11 @@
-// =====================================================================
-//  Smart Incubator - ESP32-S3 sensor node
-//  Sensor : NTC (ADC), SHT31 (I2C0), DHT11 (1-wire), MAX30102 (I2C1),
-//           load cell + HX711 (berat)
-//  Output : JSON ke MQTT topic incubator/sensors setiap PUBLISH_INTERVAL_MS
-// =====================================================================
+// =========================================================================
+//   SMART INCUBATOR - ESP32-S3 FULL INTEGRATED SENSOR & DISPLAY NODE
+//   Hardware : ESP32-S3 DevKitC-1 (N16R8)
+//   Indikator RGB (GPIO 48):
+//     - MQTT Offline : Kedip Ungu
+//     - MQTT Online  : Kedip Biru seling Kedip Hijau
+// =========================================================================
+
 #include <Arduino.h>
 #include <WiFi.h>
 #include <Wire.h>
@@ -11,199 +13,325 @@
 #include <ArduinoJson.h>
 #include <Adafruit_SHT31.h>
 #include <DHT.h>
-#include <MAX30105.h>     // SparkFun library, kompatibel MAX30102
-#include <heartRate.h>    // algoritma deteksi detak (PBA) dari SparkFun
-#include <HX711.h>
-#include <Preferences.h>  // simpan tare & kalibrasi di flash (NVS)
+#include "HX711.h"
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <Adafruit_NeoPixel.h>
 
-#include "config.h"
+// -------------------------------------------------------------------------
+// 1. KONFIGURASI JARINGAN & MQTT (RASPBERRY PI 5)
+// -------------------------------------------------------------------------
+#define WIFI_SSID           "Nama jaringan"
+#define WIFI_PASSWORD       "Frathol23091"
 
-// ---------------------------------------------------------------------
-WiFiClient     wifiClient;
-PubSubClient   mqtt(wifiClient);
-Adafruit_SHT31 sht31(&Wire);
-DHT            dht(DHT_PIN, DHT_TYPE);
-MAX30105       pulseSensor;
+#define MQTT_HOST           "10.223.183.158"    // IP Raspberry Pi 5
+#define MQTT_PORT           1883
+#define MQTT_USER           "esp32"
+#define MQTT_PASS           "12345678"
+#define MQTT_CLIENT_ID      "incubator-esp32s3"
 
-bool shtOk = false;
-bool hrOk  = false;
+#define TOPIC_SENSORS       "incubator/sensors"       // Publish JSON periodik
+#define TOPIC_STATUS        "incubator/esp32/status"  // LWT online/offline
+#define TOPIC_COMMAND       "incubator/command"       // Subscribe perintah ("tare")
 
-// Data detak jantung dibagi antara task HR dan loop() -> dilindungi spinlock
-portMUX_TYPE hrMux = portMUX_INITIALIZER_UNLOCKED;
-struct HeartData {
-  float    bpm      = NAN;   // rata-rata BPM
-  uint32_t ir       = 0;     // nilai IR terakhir (indikator kontak)
-  bool     contact  = false; // sensor menempel di kulit
-} hrShared;
+#define SENSOR_READ_MS      1000                      // Update OLED & sensor tiap 1 detik
+#define PUBLISH_INTERVAL_MS 5000                      // Kirim JSON ke MQTT tiap 5 detik
 
-// ---------------------------------------------------------------------
-//  Helper JSON: NaN -> null, dibulatkan
-// ---------------------------------------------------------------------
+// -------------------------------------------------------------------------
+// 2. PEMETAAN PIN HARDWARE ESP32-S3
+// -------------------------------------------------------------------------
+#define I2C0_SDA            8
+#define I2C0_SCL            9
+
+#define I2C1_SDA            10
+#define I2C1_SCL            11
+
+#define DHT_PIN             4
+#define DHT_TYPE            DHT11
+
+#define LC1_DT              16
+#define LC1_SCK             17
+#define LC2_DT              18
+#define LC2_SCK             21
+
+#define POT_SOC_PIN         1   // ADC1_CH0 untuk pembacaan % baterai (SoC)
+#define MAINS_DETECT_PIN    2   // HIGH = PSU:OK, LOW (GND) = MAINS:FAIL
+
+#define NEOPIXEL_PIN        48
+#define NUM_PIXELS          1
+
+#define SCREEN_WIDTH        128
+#define SCREEN_HEIGHT       64
+#define OLED_RESET          -1
+
+// -------------------------------------------------------------------------
+// 3. INISIALISASI OBJEK & VARIABEL GLOBAL
+// -------------------------------------------------------------------------
+WiFiClient        wifiClient;
+PubSubClient      mqtt(wifiClient);
+
+TwoWire           I2C_Bus0 = TwoWire(0);
+TwoWire           I2C_Bus1 = TwoWire(1);
+
+Adafruit_SHT31    sht31    = Adafruit_SHT31(&I2C_Bus0);
+Adafruit_SSD1306  oled1(SCREEN_WIDTH, SCREEN_HEIGHT, &I2C_Bus0, OLED_RESET);
+Adafruit_SSD1306  oled2(SCREEN_WIDTH, SCREEN_HEIGHT, &I2C_Bus1, OLED_RESET);
+
+DHT               dht(DHT_PIN, DHT_TYPE);
+HX711             scale1;
+HX711             scale2;
+Adafruit_NeoPixel rgbLed(NUM_PIXELS, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
+
+bool shtOk   = false;
+bool oled1Ok = false;
+bool oled2Ok = false;
+bool lc1Ok   = false;
+bool lc2Ok   = false;
+
+float cal_factor_1 = -226.34;
+float cal_factor_2 =  225.66;
+
+struct IncubatorState {
+  float shtTemp     = NAN;
+  float shtHum      = NAN;
+  float dhtTemp     = NAN;
+  float dhtHum      = NAN;
+  float weightLeft  = 0.0;
+  float weightRight = 0.0;
+  float weightTotal = 0.0;
+  int   socPercent  = 100;
+  bool  mainsOk     = true;
+  const char* fsm   = "NORMAL";
+} state;
+
+// -------------------------------------------------------------------------
+// 4. HELPER JSON & INDIKATOR LED RGB BERKEDIP
+// -------------------------------------------------------------------------
 static void putNum(JsonObject obj, const char* key, float v, int decimals = 2) {
   if (isnan(v)) { obj[key] = nullptr; return; }
   float p = powf(10.0f, decimals);
   obj[key] = roundf(v * p) / p;
 }
 
-// ---------------------------------------------------------------------
-//  NTC: rata-rata ADC (mV terkalibrasi) -> resistansi -> suhu (persamaan Beta)
-// ---------------------------------------------------------------------
-float readNtcCelsius() {
-  uint32_t sum = 0;
-  for (int i = 0; i < NTC_SAMPLES; i++) {
-    sum += analogReadMilliVolts(NTC_PIN);
-    delayMicroseconds(200);
-  }
-  float mv = (float)sum / NTC_SAMPLES;
-  if (mv <= 10.0f || mv >= NTC_VCC_MV - 10.0f) return NAN;   // terbuka / short
+void updateRgbStatus() {
+  static uint32_t lastBlink = 0;
+  static uint8_t  step      = 0;
 
-  float rNtc   = NTC_R_SERIES * mv / (NTC_VCC_MV - mv);
-  float invT   = 1.0f / (NTC_T_NOMINAL + 273.15f) + logf(rNtc / NTC_R_NOMINAL) / NTC_BETA;
-  return 1.0f / invT - 273.15f;
-}
+  // Berganti fase kedipan setiap 350 ms
+  if (millis() - lastBlink < 350) return;
+  lastBlink = millis();
 
-// ---------------------------------------------------------------------
-//  Task detak jantung: membaca FIFO MAX30102 terus-menerus (~100 Hz).
-//  Interval detak dihitung dari indeks sampel, bukan millis(), sehingga
-//  tetap akurat walau sampel dibaca per-batch dari FIFO.
-// ---------------------------------------------------------------------
-void heartRateTask(void*) {
-  float    rates[HR_AVG_SIZE] = {0};
-  uint8_t  rateIdx = 0, rateCount = 0;
-  uint32_t sampleIdx = 0, lastBeatIdx = 0;
+  step = (step + 1) % 4; // Siklus: 0 -> 1 -> 2 -> 3
 
-  for (;;) {
-    pulseSensor.check();                       // tarik sampel baru dari FIFO
-    while (pulseSensor.available()) {
-      uint32_t ir = pulseSensor.getFIFOIR();
-      pulseSensor.nextSample();
-      sampleIdx++;
+  bool isOnline = (WiFi.status() == WL_CONNECTED && mqtt.connected());
 
-      bool contact = ir >= HR_IR_FINGER_THRESHOLD;
-      if (!contact) {
-        rateCount = 0; rateIdx = 0; lastBeatIdx = 0;
-      } else if (checkForBeat((long)ir)) {
-        if (lastBeatIdx != 0) {
-          float sec = (float)(sampleIdx - lastBeatIdx) / HR_SAMPLE_RATE_HZ;
-          float bpm = 60.0f / sec;
-          if (bpm > 40.0f && bpm < 250.0f) {   // rentang neonatus bisa >180
-            rates[rateIdx] = bpm;
-            rateIdx = (rateIdx + 1) % HR_AVG_SIZE;
-            if (rateCount < HR_AVG_SIZE) rateCount++;
-          }
-        }
-        lastBeatIdx = sampleIdx;
-      }
-
-      // Tidak ada detak > 5 detik -> anggap data tidak valid
-      bool stale = lastBeatIdx == 0 ||
-                   (sampleIdx - lastBeatIdx) > (uint32_t)(5 * HR_SAMPLE_RATE_HZ);
-
-      float avg = NAN;
-      if (contact && !stale && rateCount > 0) {
-        float s = 0; for (uint8_t i = 0; i < rateCount; i++) s += rates[i];
-        avg = s / rateCount;
-      }
-
-      portENTER_CRITICAL(&hrMux);
-      hrShared.bpm = avg; hrShared.ir = ir; hrShared.contact = contact;
-      portEXIT_CRITICAL(&hrMux);
-    }
-    vTaskDelay(pdMS_TO_TICKS(10));
-  }
-}
-
-// ---------------------------------------------------------------------
-//  Berat: load cell + HX711. Dibaca non-blocking di loop() (~10 sampel/detik)
-//  lalu dirata-rata WEIGHT_AVG_SIZE sampel. Offset (tare) dan faktor
-//  kalibrasi disimpan di flash sehingga tetap ada setelah restart.
-// ---------------------------------------------------------------------
-HX711       scale;
-Preferences scalePrefs;
-long     wBuf[WEIGHT_AVG_SIZE];
-uint8_t  wIdx = 0, wCount = 0;
-uint32_t wLastSample = 0;
-long     wOffset = 0;       // nilai mentah saat timbangan kosong
-float    wFactor = 0.0f;    // nilai mentah per gram (0 = belum dikalibrasi)
-
-bool scaleOk() { return wCount > 0 && millis() - wLastSample < 1000; }
-
-long scaleRaw() {
-  if (wCount == 0) return 0;
-  int64_t s = 0;
-  for (uint8_t i = 0; i < wCount; i++) s += wBuf[i];
-  return (long)(s / wCount);
-}
-
-float scaleGrams() {
-  if (!scaleOk() || wFactor == 0.0f) return NAN;
-  return (float)(scaleRaw() - wOffset) / wFactor;
-}
-
-void initScale() {
-  scale.begin(HX711_DOUT_PIN, HX711_SCK_PIN);   // channel A, gain 128
-  scalePrefs.begin("scale", false);
-  wOffset = scalePrefs.getLong("offset", 0);
-  wFactor = scalePrefs.getFloat("factor", 0.0f);
-  bool found = scale.wait_ready_timeout(1000);
-  Serial.printf("[HX711] %s, offset=%ld, faktor=%.3f%s\n",
-                found ? "OK" : "TIDAK TERDETEKSI", wOffset, wFactor,
-                wFactor == 0.0f ? "  -> BELUM DIKALIBRASI: ketik 't', lalu 'c <gram>'" : "");
-}
-
-void sampleScale() {
-  if (!scale.is_ready()) return;
-  wBuf[wIdx] = scale.read();
-  wIdx = (wIdx + 1) % WEIGHT_AVG_SIZE;
-  if (wCount < WEIGHT_AVG_SIZE) wCount++;
-  wLastSample = millis();
-}
-
-// Perintah Serial Monitor: t | c <gram> | w
-void handleSerial() {
-  static String line;
-  while (Serial.available()) {
-    char ch = (char)Serial.read();
-    if (ch != '\r' && ch != '\n') { if (line.length() < 32) line += ch; continue; }
-    line.trim();
-    if (line.length() == 0) continue;
-
-    if (line == "t") {
-      if (!scaleOk()) Serial.println("[HX711] tidak ada data, cek wiring");
-      else {
-        wOffset = scaleRaw();
-        scalePrefs.putLong("offset", wOffset);
-        Serial.printf("[HX711] tare OK, offset=%ld\n", wOffset);
-      }
-    } else if (line.startsWith("c ")) {
-      float g = line.substring(2).toFloat();
-      long  d = scaleRaw() - wOffset;
-      if (!scaleOk() || g <= 0) Serial.println("[HX711] format: c <gram>, mis. c 500");
-      else if (labs(d) < 1000)  Serial.println("[HX711] beban tidak terbaca. Sudah 't' saat kosong, lalu beban diletakkan?");
-      else {
-        wFactor = (float)d / g;
-        scalePrefs.putFloat("factor", wFactor);
-        Serial.printf("[HX711] kalibrasi OK, faktor=%.3f\n", wFactor);
-      }
-    } else if (line == "w") {
-      Serial.printf("[HX711] raw=%ld offset=%ld faktor=%.3f berat=%.1f g\n",
-                    scaleRaw(), wOffset, wFactor, scaleGrams());
+  if (!isOnline) {
+    // JIKA MQTT MASIH OFFLINE: Kedip UNGU
+    if (step == 0 || step == 2) {
+      rgbLed.setPixelColor(0, rgbLed.Color(150, 0, 150)); // Ungu menyala
     } else {
-      Serial.println("Perintah: t (tare) | c <gram> (kalibrasi) | w (lihat berat)");
+      rgbLed.clear(); // Mati
     }
-    line = "";
+  } else {
+    // JIKA MQTT ONLINE: Kedip BIRU seling Kedip HIJAU
+    if (step == 0) {
+      rgbLed.setPixelColor(0, rgbLed.Color(0, 0, 180));   // Biru menyala
+    } else if (step == 2) {
+      rgbLed.setPixelColor(0, rgbLed.Color(0, 180, 0));   // Hijau menyala
+    } else {
+      rgbLed.clear(); // Mati (jeda di antara kedipan)
+    }
+  }
+
+  rgbLed.show();
+}
+
+// -------------------------------------------------------------------------
+// 5. FUNGSI TARE & KALIBRASI LOAD CELL
+// -------------------------------------------------------------------------
+void tareLoadCells() {
+  Serial.println("\n>>> [TARE] Menolkan kedua Load Cell...");
+  if (lc1Ok) scale1.tare();
+  if (lc2Ok) scale2.tare();
+  Serial.println(">>> [TARE] Selesai! Berat baki direset ke 0.0 g\n");
+}
+
+void calibrateLoadCellsInteractive() {
+  Serial.println("\n==========================================");
+  Serial.println("     MODE KALIBRASI INTERAKTIF LOAD CELL");
+  Serial.println("==========================================");
+  Serial.println("1. Kosongkan baki inkubator...");
+  scale1.set_scale(1.0f);
+  scale2.set_scale(1.0f);
+  scale1.tare();
+  scale2.tare();
+  Serial.println("2. Letakkan beban referensi (contoh: 200 gram).");
+  Serial.println("3. Ketik berat beban (dalam gram) di Serial Monitor lalu Enter:");
+
+  unsigned long startWait = millis();
+  while (Serial.available() == 0) {
+    updateRgbStatus(); // Tetap jalankan kedipan LED selama menunggu input
+    if (millis() - startWait > 30000) {
+      Serial.println("[TIMEOUT] Kalibrasi dibatalkan.");
+      scale1.set_scale(cal_factor_1);
+      scale2.set_scale(cal_factor_2);
+      return;
+    }
+    delay(10);
+  }
+
+  float knownWeight = Serial.parseFloat();
+  while (Serial.available() > 0) Serial.read();
+
+  if (knownWeight <= 0) {
+    Serial.println("[BATAL] Input berat tidak valid.");
+    scale1.set_scale(cal_factor_1);
+    scale2.set_scale(cal_factor_2);
+    return;
+  }
+
+  long raw1 = scale1.read_average(15);
+  long raw2 = scale2.read_average(15);
+
+  cal_factor_1 = (float)raw1 / knownWeight;
+  cal_factor_2 = (float)raw2 / knownWeight;
+
+  scale1.set_scale(cal_factor_1);
+  scale2.set_scale(cal_factor_2);
+
+  Serial.printf("[SUKSES] Faktor Kalibrasi Baru -> LC1: %.2f | LC2: %.2f\n\n", cal_factor_1, cal_factor_2);
+}
+
+// -------------------------------------------------------------------------
+// 6. PEMBACAAN SENSOR & EVALUASI FSM
+// -------------------------------------------------------------------------
+void readAllSensors() {
+  // 1. SHT31
+  if (!shtOk) shtOk = sht31.begin(0x44);
+  if (shtOk) {
+    state.shtTemp = sht31.readTemperature();
+    state.shtHum  = sht31.readHumidity();
+  } else {
+    state.shtTemp = NAN;
+    state.shtHum  = NAN;
+  }
+
+  // 2. DHT11
+  state.dhtTemp = dht.readTemperature();
+  state.dhtHum  = dht.readHumidity();
+
+  // 3. Load Cell 1 & 2
+  if (lc1Ok && scale1.is_ready()) {
+    state.weightLeft = scale1.get_units(2);
+  }
+  if (lc2Ok && scale2.is_ready()) {
+    state.weightRight = scale2.get_units(2);
+  }
+  state.weightTotal = (state.weightLeft + state.weightRight) / 2.0f;
+  if (abs(state.weightTotal) < 0.5f) state.weightTotal = 0.0f;
+
+  // 4. Potensiometer Baterai (SoC %) & Jumper Listrik Utama (GPIO 2)
+  uint32_t mv = analogReadMilliVolts(POT_SOC_PIN);
+  state.socPercent = constrain(map(mv, 0, 3100, 0, 100), 0, 100);
+  state.mainsOk    = (digitalRead(MAINS_DETECT_PIN) == HIGH);
+
+  // 5. Evaluasi Logika FSM Lokal
+  float refTemp = !isnan(state.shtTemp) ? state.shtTemp : state.dhtTemp;
+  if ((!isnan(refTemp) && (refTemp > 37.5f || refTemp < 31.5f)) || (!state.mainsOk && state.socPercent < 20)) {
+    state.fsm = "CRITICAL";
+  } else if (!state.mainsOk || (!isnan(refTemp) && (refTemp > 36.8f || refTemp < 32.5f)) || state.socPercent < 35) {
+    state.fsm = "WARN";
+  } else {
+    state.fsm = "NORMAL";
   }
 }
 
-// ---------------------------------------------------------------------
-//  WiFi & MQTT (non-blocking reconnect)
-// ---------------------------------------------------------------------
+// -------------------------------------------------------------------------
+// 7. UPDATE TAMPILAN 2x LAYAR OLED
+// -------------------------------------------------------------------------
+void updateOledDisplays() {
+  if (oled1Ok) {
+    oled1.clearDisplay();
+    oled1.setTextSize(1);
+    oled1.setTextColor(SSD1306_WHITE);
+
+    oled1.setCursor(0, 0);
+    oled1.printf("INKUBATOR [%s]", state.fsm);
+    oled1.drawFastHLine(0, 10, 128, SSD1306_WHITE);
+
+    oled1.setCursor(0, 15);
+    if (!isnan(state.shtTemp)) {
+      oled1.printf("SHT31: %.1fC | %.1f%%", state.shtTemp, state.shtHum);
+    } else {
+      oled1.print("SHT31: TIDAK AKTIF");
+    }
+
+    oled1.setCursor(0, 27);
+    if (!isnan(state.dhtTemp)) {
+      oled1.printf("DHT11: %.1fC | %.1f%%", state.dhtTemp, state.dhtHum);
+    } else {
+      oled1.print("DHT11: TIDAK AKTIF");
+    }
+
+    oled1.drawFastHLine(0, 39, 128, SSD1306_WHITE);
+    oled1.setCursor(0, 44);
+    oled1.print("BERAT BAKI:");
+    oled1.setCursor(0, 54);
+    oled1.printf(">> %.1f gram <<", state.weightTotal);
+
+    oled1.display();
+  }
+
+  if (oled2Ok) {
+    oled2.clearDisplay();
+    oled2.setTextSize(1);
+    oled2.setTextColor(SSD1306_WHITE);
+
+    oled2.setCursor(0, 0);
+    oled2.print("POWER & TELEMETRI S3");
+    oled2.drawFastHLine(0, 10, 128, SSD1306_WHITE);
+
+    oled2.setCursor(0, 15);
+    oled2.printf("SUMBER: %s", state.mainsOk ? "PSU:OK (AC)" : "MAINS:FAIL!");
+
+    oled2.setCursor(0, 27);
+    oled2.printf("BATERAI SoC: %d%%", state.socPercent);
+
+    oled2.setCursor(0, 39);
+    if (WiFi.status() == WL_CONNECTED) {
+      oled2.printf("WiFi: OK (%d dBm)", WiFi.RSSI());
+    } else {
+      oled2.print("WiFi: RECONNECTING..");
+    }
+
+    oled2.setCursor(0, 51);
+    oled2.printf("MQTT: %s", mqtt.connected() ? "ONLINE (RPi5)" : "OFFLINE");
+
+    oled2.display();
+  }
+}
+
+// -------------------------------------------------------------------------
+// 8. KONEKSI WIFI, MQTT & PUBLISH JSON
+// -------------------------------------------------------------------------
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  String msg;
+  for (unsigned int i = 0; i < length; i++) msg += (char)payload[i];
+  msg.trim();
+  Serial.printf("[MQTT CMD] Topik: %s | Pesan: %s\n", topic, msg.c_str());
+
+  if (msg.equalsIgnoreCase("tare")) {
+    tareLoadCells();
+  }
+}
+
 void ensureWifi() {
   static uint32_t lastTry = 0;
   if (WiFi.status() == WL_CONNECTED) return;
   if (millis() - lastTry < 10000 && lastTry != 0) return;
   lastTry = millis();
-  Serial.printf("[WiFi] menghubungkan ke %s ...\n", WIFI_SSID);
+
+  Serial.printf("[WiFi] Menghubungkan ke %s ...\n", WIFI_SSID);
   WiFi.disconnect();
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 }
@@ -214,119 +342,161 @@ void ensureMqtt() {
   if (millis() - lastTry < 5000 && lastTry != 0) return;
   lastTry = millis();
 
-  Serial.printf("[MQTT] menghubungkan ke %s:%d ...\n", MQTT_HOST, MQTT_PORT);
-  // Last Will: broker otomatis publish "offline" jika ESP32 putus
+  Serial.printf("[MQTT] Menghubungkan ke %s:%d ...\n", MQTT_HOST, MQTT_PORT);
   if (mqtt.connect(MQTT_CLIENT_ID, MQTT_USER, MQTT_PASS,
                    TOPIC_STATUS, 1, true, "offline")) {
-    Serial.println("[MQTT] terhubung");
+    Serial.println("[MQTT] Terhubung ke Broker Raspberry Pi 5!");
     mqtt.publish(TOPIC_STATUS, "online", true);
+    mqtt.subscribe(TOPIC_COMMAND);
   } else {
-    Serial.printf("[MQTT] gagal, rc=%d\n", mqtt.state());
+    Serial.printf("[MQTT] Gagal terhubung, rc=%d\n", mqtt.state());
   }
-}
-
-// ---------------------------------------------------------------------
-void initSensors() {
-  // SHT31 di bus I2C #0
-  Wire.begin(I2C0_SDA, I2C0_SCL, 100000);
-  shtOk = sht31.begin(0x44);
-  Serial.printf("[SHT31] %s\n", shtOk ? "OK" : "TIDAK TERDETEKSI (cek alamat 0x44/0x45)");
-
-  // DHT11
-  dht.begin();
-
-  // NTC
-  analogReadResolution(12);
-  analogSetPinAttenuation(NTC_PIN, ADC_11db);   // rentang ~0-3.1 V
-
-  // MAX30102 di bus I2C #1
-  Wire1.begin(I2C1_SDA, I2C1_SCL, 400000);
-  hrOk = pulseSensor.begin(Wire1, I2C_SPEED_FAST);
-  if (hrOk) {
-    // ledBrightness, sampleAverage, ledMode(2=Red+IR), sampleRate, pulseWidth, adcRange
-    pulseSensor.setup(0x1F, 4, 2, 400, 411, 4096);
-    xTaskCreatePinnedToCore(heartRateTask, "hr", 4096, nullptr, 2, nullptr, 1);
-  }
-  Serial.printf("[MAX30102] %s\n", hrOk ? "OK" : "TIDAK TERDETEKSI");
-
-  // Load cell + HX711
-  initScale();
 }
 
 void publishSensors() {
-  float ntcT  = readNtcCelsius();
-
-  float shtT = NAN, shtH = NAN;
-  if (!shtOk) shtOk = sht31.begin(0x44);       // coba lagi jika sempat lepas
-  if (shtOk) { shtT = sht31.readTemperature(); shtH = sht31.readHumidity(); }
-
-  float dhtT = dht.readTemperature();
-  float dhtH = dht.readHumidity();
-
-  HeartData hr;
-  portENTER_CRITICAL(&hrMux);
-  hr = hrShared;
-  portEXIT_CRITICAL(&hrMux);
-
   JsonDocument doc;
   JsonObject root = doc.to<JsonObject>();
-  JsonObject ntc  = root["ntc"].to<JsonObject>();
-  putNum(ntc, "temp", ntcT);
 
-  JsonObject sht  = root["sht31"].to<JsonObject>();
-  putNum(sht, "temp", shtT); putNum(sht, "hum", shtH);
+  JsonObject sht = root["sht31"].to<JsonObject>();
+  putNum(sht, "temp", state.shtTemp, 2);
+  putNum(sht, "hum", state.shtHum, 2);
 
-  JsonObject dh   = root["dht11"].to<JsonObject>();
-  putNum(dh, "temp", dhtT, 1); putNum(dh, "hum", dhtH, 1);
+  JsonObject dh = root["dht11"].to<JsonObject>();
+  putNum(dh, "temp", state.dhtTemp, 1);
+  putNum(dh, "hum", state.dhtHum, 1);
 
-  JsonObject heart = root["heart"].to<JsonObject>();
-  putNum(heart, "bpm", hr.bpm, 0);
-  heart["contact"] = hr.contact;
-  heart["ir"]      = hr.ir;
-  heart["sensor_ok"] = hrOk;
+  JsonObject weight = root["weight"].to<JsonObject>();
+  putNum(weight, "total_g", state.weightTotal, 1);
+  putNum(weight, "left_g", state.weightLeft, 1);
+  putNum(weight, "right_g", state.weightRight, 1);
+  weight["sensor_ok"] = (lc1Ok && lc2Ok);
 
-  JsonObject wt = root["weight"].to<JsonObject>();
-  putNum(wt, "g", scaleGrams(), 0);
-  wt["raw"]        = scaleRaw();
-  wt["calibrated"] = wFactor != 0.0f;
-  wt["sensor_ok"]  = scaleOk();
+  JsonObject pwr = root["power"].to<JsonObject>();
+  pwr["soc_pct"]  = state.socPercent;
+  pwr["mains_ok"] = state.mainsOk;
+  pwr["status"]   = state.mainsOk ? "PSU:OK" : "MAINS:FAIL";
 
-  root["uptime_s"] = millis() / 1000;
-  root["rssi"]     = WiFi.RSSI();
+  root["fsm_state"] = state.fsm;
+  root["uptime_s"]  = millis() / 1000;
+  root["rssi"]      = WiFi.RSSI();
 
-  char buf[512];
+  char buf[640];
   size_t n = serializeJson(doc, buf, sizeof(buf));
   bool ok = mqtt.publish(TOPIC_SENSORS, (const uint8_t*)buf, n, false);
-  Serial.printf("[PUB %s] %s\n", ok ? "ok" : "GAGAL", buf);
+  Serial.printf("[PUB %s] %s\n", ok ? "OK" : "GAGAL", buf);
 }
 
-// ---------------------------------------------------------------------
+// -------------------------------------------------------------------------
+// 9. INISIALISASI HARDWARE & SETUP
+// -------------------------------------------------------------------------
+void initHardware() {
+  rgbLed.begin();
+  rgbLed.setPixelColor(0, rgbLed.Color(150, 0, 150)); // Ungu awal saat boot
+  rgbLed.show();
+
+  analogReadResolution(12);
+  analogSetPinAttenuation(POT_SOC_PIN, ADC_11db);
+  pinMode(MAINS_DETECT_PIN, INPUT_PULLUP);
+
+  I2C_Bus0.begin(I2C0_SDA, I2C0_SCL, 100000);
+  shtOk = sht31.begin(0x44);
+  Serial.printf("[SHT31]  %s\n", shtOk ? "OK (0x44)" : "TIDAK TERDETEKSI");
+
+  oled1Ok = oled1.begin(SSD1306_SWITCHCAPVCC, 0x3C);
+  Serial.printf("[OLED 1] %s\n", oled1Ok ? "OK (Bus I2C-0, 0x3C)" : "TIDAK TERDETEKSI");
+
+  I2C_Bus1.begin(I2C1_SDA, I2C1_SCL, 100000);
+  oled2Ok = oled2.begin(SSD1306_SWITCHCAPVCC, 0x3C);
+  Serial.printf("[OLED 2] %s\n", oled2Ok ? "OK (Bus I2C-1, 0x3C)" : "TIDAK TERDETEKSI");
+
+  dht.begin();
+  Serial.println("[DHT11]  Diinisialisasi pada GPIO 4");
+
+  scale1.begin(LC1_DT, LC1_SCK);
+  scale2.begin(LC2_DT, LC2_SCK);
+
+  lc1Ok = scale1.wait_ready_timeout(1000);
+  if (lc1Ok) {
+    scale1.set_scale(cal_factor_1);
+    scale1.tare();
+    Serial.println("[LC 1]   OK & Di-tare (GPIO 16/17)");
+  } else {
+    Serial.println("[LC 1]   TIDAK TERDETEKSI");
+  }
+
+  lc2Ok = scale2.wait_ready_timeout(1000);
+  if (lc2Ok) {
+    scale2.set_scale(cal_factor_2);
+    scale2.tare();
+    Serial.println("[LC 2]   OK & Di-tare (GPIO 18/21)");
+  } else {
+    Serial.println("[LC 2]   TIDAK TERDETEKSI");
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   delay(500);
-  Serial.println("\n=== Smart Incubator - ESP32-S3 ===");
+  Serial.println("\n=======================================================");
+  Serial.println("   SMART INCUBATOR - ESP32-S3 INTEGRATED SENSOR NODE");
+  Serial.println("   Ketik 't' + Enter di Serial Monitor untuk TARE");
+  Serial.println("   Ketik 'c' + Enter di Serial Monitor untuk KALIBRASI");
+  Serial.println("=======================================================\n");
+
+  initHardware();
 
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
   mqtt.setBufferSize(768);
   mqtt.setKeepAlive(15);
+  mqtt.setCallback(mqttCallback);
 
-  initSensors();
   ensureWifi();
 }
 
+// -------------------------------------------------------------------------
+// 10. MAIN LOOP (NON-BLOCKING)
+// -------------------------------------------------------------------------
 void loop() {
   ensureWifi();
   ensureMqtt();
   mqtt.loop();
-  sampleScale();
-  handleSerial();
 
+  // Jalankan efek kedipan lampu RGB berdasarkan status MQTT
+  updateRgbStatus();
+
+  // Cek perintah interaktif dari Serial Monitor ('t' untuk Tare, 'c' untuk Kalibrasi)
+  if (Serial.available() > 0) {
+    char cmd = Serial.read();
+    while (Serial.available() > 0) Serial.read();
+    if (cmd == 't' || cmd == 'T') {
+      tareLoadCells();
+    } else if (cmd == 'c' || cmd == 'C') {
+      calibrateLoadCellsInteractive();
+    }
+  }
+
+  // Baca sensor & perbarui tampilan kedua OLED setiap 1 detik
+  static uint32_t lastRead = 0;
+  if (millis() - lastRead >= SENSOR_READ_MS) {
+    lastRead = millis();
+    readAllSensors();
+    updateOledDisplays();
+  }
+
+  // Publish paket JSON ke MQTT setiap 5 detik
   static uint32_t lastPub = 0;
   if (millis() - lastPub >= PUBLISH_INTERVAL_MS) {
     lastPub = millis();
-    if (mqtt.connected()) publishSensors();
+    if (mqtt.connected()) {
+      publishSensors();
+    } else {
+      Serial.printf("[LOCAL] SHT:%.1fC | DHT:%.1fC | Berat:%.1fg | SoC:%d%% | %s\n",
+                    state.shtTemp, state.dhtTemp, state.weightTotal,
+                    state.socPercent, state.mainsOk ? "PSU:OK" : "MAINS:FAIL");
+    }
   }
+
   delay(5);
 }
