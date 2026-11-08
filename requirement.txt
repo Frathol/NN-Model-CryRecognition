@@ -1,5 +1,10 @@
+# Core numerical & signal processing
 numpy
 scipy
+
+# Audio capture & TFLite runtime
 sounddevice
-paho-mqtt
 ai-edge-litert
+
+# MQTT messaging client
+paho-mqtt
