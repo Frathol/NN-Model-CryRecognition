@@ -95,3 +95,48 @@ figcaption { font-size: 13px; font-weight: 600; color: var(--text-secondary); ma
 .log tbody:empty::after { content: "No events yet."; display: block; padding: 8px; color: var(--text-muted); }
 
 footer { margin-top: 18px; font-size: 12px; color: var(--text-muted); text-align: center; }
+
+/* ---- Camera ---- */
+[hidden] { display: none !important; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.camera { margin-top: 12px; }
+.camera-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.camera-head h2 { margin: 0; }
+.camera-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.btn {
+  font: inherit; font-size: 13px; font-weight: 500; padding: 7px 14px; border-radius: 8px; cursor: pointer;
+  border: 1px solid var(--border); background: var(--page); color: var(--text-primary);
+}
+.btn:hover:not(:disabled) { border-color: var(--axis); }
+.btn:focus-visible { outline: 2px solid var(--series-1); outline-offset: 2px; }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+.btn[aria-pressed="true"] { background: var(--text-primary); color: var(--page); border-color: var(--text-primary); }
+.btn.small { padding: 3px 9px; font-size: 12px; }
+.btn-rec { color: var(--critical); }
+.btn-rec.active { background: var(--critical); color: #fff; border-color: var(--critical); }
+.btn.danger { color: var(--critical); }
+.rec-badge { color: var(--critical); font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+@media (prefers-reduced-motion: no-preference) { .rec-badge { animation: blink 1.4s steps(2, start) infinite; } }
+@keyframes blink { 50% { opacity: .35; } }
+.cam-view {
+  position: relative; margin-top: 12px; background: #111; border-radius: 8px; overflow: hidden;
+  aspect-ratio: 16 / 9; max-height: 70vh; display: flex; align-items: center; justify-content: center;
+}
+.cam-view img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.cam-msg {
+  position: absolute; left: 0; right: 0; bottom: 0; padding: 8px 12px; font-size: 13px;
+  color: #fff; background: rgba(0, 0, 0, .6);
+}
+.cam-msg:empty { display: none; }
+#cam-status { margin-top: 8px; }
+.cam-player { margin-top: 12px; }
+.cam-player video { width: 100%; max-height: 70vh; margin-top: 6px; background: #111; border-radius: 8px; }
+.cam-recs { margin-top: 10px; }
+.cam-recs summary { cursor: pointer; font-size: 13px; color: var(--text-secondary); padding: 4px 0; }
+.cam-recs table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 4px; }
+.cam-recs th { text-align: left; color: var(--text-muted); font-weight: 500; padding: 6px 8px; border-bottom: 1px solid var(--grid); }
+.cam-recs td { padding: 6px 8px; border-bottom: 1px solid var(--grid); font-variant-numeric: tabular-nums; }
+.cam-recs td:last-child { text-align: right; white-space: nowrap; }
+.cam-recs td:last-child .btn, .cam-recs td:last-child a { margin-left: 4px; }
+.cam-recs a.btn { text-decoration: none; display: inline-block; }
+.cam-recs tbody:empty::after { content: "No recordings yet."; display: block; padding: 8px; color: var(--text-muted); }

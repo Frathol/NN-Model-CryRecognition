@@ -290,7 +290,7 @@
     setAlarm("fsm", fsmLevel(s) === "bad", "critical", `ESP32 reported status: ${s}`, false);
   }
 
-  // Cry reason from the stage-2 model (sent only by audio_detector.py)
+  // Cry reason from the stage-2 model (sent by cry_service.py two_stage / audio_detector.py)
   const REASON_TEXT = {
     hungry: "Hungry",
     belly_pain: "Belly pain",
@@ -319,6 +319,11 @@
       setText("cry-icon", "🙂");
     }
     if ("reason" in m) showReason(m);
+    if (typeof m.source === "string") {
+      setText("cry-source", m.source.startsWith("replay:")
+        ? `Source: offline test file · ${m.source.slice(7)}`
+        : "Source: live microphone");
+    }
     push(charts.cry, 0, t, p);
     dirty = true;
   }
@@ -395,6 +400,191 @@
     });
   }
 
+  // ------------------------------------------------------------------
+  //  Camera (camera_service.py behind nginx at /camera/, password-protected)
+  // ------------------------------------------------------------------
+  function initCamera() {
+    const CAM = "camera/";
+    const ui = {
+      toggle: $("cam-toggle"), record: $("cam-record"), view: $("cam-view"), img: $("cam-img"),
+      msg: $("cam-msg"), status: $("cam-status"), badge: $("cam-rec-badge"), recTime: $("cam-rec-time"),
+      recs: $("cam-recs"), list: $("cam-rec-list"), count: $("cam-rec-count"),
+      player: $("cam-player"), video: $("cam-video"), playerName: $("cam-player-name"),
+    };
+    if (!ui.toggle) return;
+    const cam = { watching: false, poller: null, rec: null, recAt: 0, busy: false };
+
+    const mmss = (s) => {
+      s = Math.max(0, Math.floor(s));
+      const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
+      return (h ? `${h}:${String(m).padStart(2, "0")}` : String(m).padStart(2, "0")) + ":" + String(r).padStart(2, "0");
+    };
+    const mb = (b) => (b >= 1e9 ? `${(b / 1e9).toFixed(2)} GB` : `${(b / 1e6).toFixed(1)} MB`);
+
+    async function api(path, opts = {}) {
+      let r;
+      try { r = await fetch(CAM + path, { cache: "no-store", ...opts }); }
+      catch { throw new Error("cannot reach the Raspberry Pi"); }
+      let body = {};
+      try { body = await r.json(); } catch { /* not JSON */ }
+      if (!r.ok) {
+        const hint = r.status === 401 ? "wrong camera username/password"
+          : (r.status === 502 || r.status === 504) ? "camera service is not running"
+          : r.status === 404 && !body.error ? "camera is not set up on this Pi (run setup_camera.sh)"
+          : body.error || `HTTP ${r.status}`;
+        throw new Error(hint);
+      }
+      return body;
+    }
+
+    function render(st) {
+      const c = st.camera, r = st.recording;
+      cam.rec = r.active ? r : null;
+      cam.recAt = Date.now();
+      ui.record.disabled = !c.ok && !r.active;
+      ui.record.classList.toggle("active", r.active);
+      ui.record.textContent = r.active ? "■ Stop recording" : "● Start recording";
+      ui.badge.hidden = !r.active;
+      if (c.ok) {
+        const size = c.size ? `${c.size[0]}×${c.size[1]}` : "";
+        let txt = `Camera: ${c.backend} · ${size} · ${c.fps} fps · ${c.viewers} viewer${c.viewers === 1 ? "" : "s"}`;
+        txt += ` · ${mb(r.free_mb * 1e6)} free`;
+        if (r.error) txt += ` · last recording error: ${r.error}`;
+        ui.status.textContent = txt;
+      } else {
+        ui.status.textContent = `Camera not available: ${c.error || "starting…"}`;
+      }
+      tickRec();
+    }
+
+    function tickRec() {
+      if (!cam.rec) return;
+      const el = cam.rec.elapsed_s + (Date.now() - cam.recAt) / 1000;
+      ui.recTime.textContent = mmss(el) + (cam.rec.max_s ? ` / ${mmss(cam.rec.max_s)}` : "");
+    }
+    setInterval(tickRec, 1000);
+
+    async function poll() {
+      try { render(await api("api/status")); }
+      catch (e) {
+        ui.status.textContent = `Camera: ${e.message}`;
+        ui.record.disabled = true;
+      }
+    }
+    function startPolling() {
+      if (cam.poller) return;
+      poll();
+      cam.poller = setInterval(poll, 2000);
+    }
+
+    // ---- live view ----
+    function setStream(on) {
+      if (on) {
+        ui.msg.textContent = "Connecting to camera…";
+        ui.img.src = CAM + "stream.mjpg?t=" + Date.now();
+      } else {
+        ui.img.removeAttribute("src");   // closes the MJPEG connection
+      }
+    }
+    ui.img.addEventListener("load", () => { ui.msg.textContent = ""; });
+    ui.img.addEventListener("error", () => {
+      if (!cam.watching) return;
+      ui.msg.textContent = "Live view unavailable. Retrying…";
+      setTimeout(() => { if (cam.watching && !document.hidden) setStream(true); }, 3000);
+    });
+    ui.toggle.addEventListener("click", () => {
+      cam.watching = !cam.watching;
+      ui.toggle.setAttribute("aria-pressed", String(cam.watching));
+      ui.toggle.textContent = cam.watching ? "Stop watching" : "Watch camera";
+      ui.view.hidden = !cam.watching;
+      setStream(cam.watching);
+      startPolling();
+    });
+    // Pause the stream when the tab is hidden (saves Wi-Fi bandwidth and Pi CPU).
+    document.addEventListener("visibilitychange", () => {
+      if (cam.watching) setStream(!document.hidden);
+    });
+
+    // ---- recording ----
+    ui.record.addEventListener("click", async () => {
+      if (cam.busy) return;
+      cam.busy = true; ui.record.disabled = true;
+      startPolling();
+      try {
+        if (cam.rec) {
+          const r = await api("api/record/stop", { method: "POST" });
+          addEvent("Camera", r.file ? `Recording saved: ${r.file}` : "Recording stopped");
+          loadRecordings();
+        } else {
+          const r = await api("api/record/start", { method: "POST" });
+          addEvent("Camera", `Recording started: ${r.file}`);
+        }
+      } catch (e) {
+        addEvent("Camera", `Recording failed: ${e.message}`);
+        ui.status.textContent = `Camera: ${e.message}`;
+      } finally {
+        cam.busy = false;
+        await poll();
+      }
+    });
+
+    // ---- recordings list & player ----
+    function btn(label, cls, onClick) {
+      const b = document.createElement("button");
+      b.type = "button"; b.className = "btn small " + cls; b.textContent = label;
+      b.addEventListener("click", onClick);
+      return b;
+    }
+    async function loadRecordings() {
+      try {
+        const { recordings } = await api("api/recordings");
+        ui.count.textContent = recordings.length;
+        ui.list.replaceChildren(...recordings.map((r) => {
+          const tr = document.createElement("tr");
+          const tdT = document.createElement("td"); tdT.textContent = r.mtime;
+          const tdS = document.createElement("td"); tdS.textContent = mb(r.size);
+          const tdA = document.createElement("td");
+          const url = CAM + "recordings/" + encodeURIComponent(r.name);
+          const dl = document.createElement("a");
+          dl.className = "btn small"; dl.href = url + "?download=1"; dl.textContent = "Download";
+          dl.setAttribute("download", r.name);
+          tdA.append(
+            btn("Play", "", () => {
+              ui.player.hidden = false; ui.playerName.textContent = `${r.name} · ${r.mtime}`;
+              ui.video.src = url; ui.video.play().catch(() => {});
+              ui.player.scrollIntoView({ behavior: "smooth", block: "nearest" });
+            }),
+            dl,
+            btn("Delete", "danger", async () => {
+              if (!confirm(`Delete recording ${r.name}?`)) return;
+              try {
+                await api("api/recordings/" + encodeURIComponent(r.name), { method: "DELETE" });
+                if (ui.video.src.endsWith(encodeURIComponent(r.name))) closePlayer();
+                addEvent("Camera", `Recording deleted: ${r.name}`);
+              } catch (e) { alert(`Could not delete: ${e.message}`); }
+              loadRecordings();
+            }),
+          );
+          tr.append(tdT, tdS, tdA);
+          return tr;
+        }));
+      } catch (e) {
+        ui.count.textContent = "?";
+        ui.list.replaceChildren();
+        ui.status.textContent = `Camera: ${e.message}`;
+      }
+    }
+    function closePlayer() {
+      ui.video.pause(); ui.video.removeAttribute("src"); ui.video.load();
+      ui.player.hidden = true;
+    }
+    $("cam-player-close").addEventListener("click", closePlayer);
+    ui.recs.addEventListener("toggle", () => {
+      if (ui.recs.open) { loadRecordings(); startPolling(); }
+    });
+  }
+
   initCharts();
   connect();
+  try { initCamera(); } catch (e) { console.warn("Camera panel disabled:", e); }
 })();

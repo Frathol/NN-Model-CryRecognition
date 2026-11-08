@@ -36,6 +36,7 @@
         <div class="meta">Possible cause: <strong id="cry-reason-label">—</strong> <span id="cry-reason-conf"></span></div>
         <div class="meta small">Stage-2 model estimate, not a diagnosis.</div>
       </div>
+      <div class="meta small" id="cry-source"></div>
     </article>
 
     <article class="tile">
@@ -73,6 +74,36 @@
       <div class="hero"><span id="v-soc">—</span><span class="unit">%</span></div>
       <div class="meta" id="v-power-info">Mains: —</div>
     </article>
+  </section>
+
+  <section class="card camera" id="camera" aria-labelledby="cam-title">
+    <div class="camera-head">
+      <h2 id="cam-title">Camera</h2>
+      <div class="camera-actions">
+        <span class="rec-badge" id="cam-rec-badge" hidden>● REC <span id="cam-rec-time">00:00</span></span>
+        <button type="button" class="btn" id="cam-toggle" aria-pressed="false">Watch camera</button>
+        <button type="button" class="btn btn-rec" id="cam-record">● Start recording</button>
+      </div>
+    </div>
+    <div class="cam-view" id="cam-view" hidden>
+      <img id="cam-img" alt="Live camera view of the incubator">
+      <div class="cam-msg" id="cam-msg"></div>
+    </div>
+    <div class="meta small" id="cam-status">Camera is off. Press “Watch camera” to see the live view.</div>
+    <div class="cam-player" id="cam-player" hidden>
+      <div class="camera-head">
+        <span class="meta" id="cam-player-name"></span>
+        <button type="button" class="btn small" id="cam-player-close">Close</button>
+      </div>
+      <video id="cam-video" controls playsinline preload="metadata"></video>
+    </div>
+    <details class="cam-recs" id="cam-recs">
+      <summary>Recordings (<span id="cam-rec-count">—</span>)</summary>
+      <table>
+        <thead><tr><th>Recorded at</th><th>Size</th><th><span class="sr-only">Actions</span></th></tr></thead>
+        <tbody id="cam-rec-list"></tbody>
+      </table>
+    </details>
   </section>
 
   <section class="charts">

@@ -4,7 +4,7 @@ window.DASHBOARD_CONFIG = {
   // bila dashboard dibuka dari Raspberry Pi itu sendiri.
   mqttUrl: (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/mqtt",
   username: "dashboard",                 // akun READ-ONLY (lihat ACL Mosquitto)
-  password: "",    // diisi otomatis oleh setup_pi.sh
+  password: "12345678",    // diisi otomatis oleh setup_pi.sh
 
   topics: {
     sensors:    "incubator/sensors",
