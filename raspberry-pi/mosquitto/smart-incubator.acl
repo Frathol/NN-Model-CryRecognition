@@ -6,10 +6,22 @@ user esp32
 topic write incubator/sensors
 topic write incubator/esp32/status
 topic read  incubator/cmd/#
+# status tangisan dari cry_service (peringatan detak 161-180 BPM ditahan saat bayi menangis)
+topic read  incubator/cry/state
+topic read  incubator/cry/status
 
 # Layanan cry recognition di Raspberry Pi
 user cryservice
 topic write incubator/cry/#
+
+# Node pembaca Load Cell Kiri di Raspberry Pi 5
+user loadcell
+topic write incubator/loadcell/left
+
+# Mesin alarm FSM (fsm.py): baca semua data, tulis hanya keputusan alarm
+user fsm
+topic read  incubator/#
+topic write incubator/fsm/state
 
 # Dashboard web (kredensial ini terlihat di browser -> HANYA baca)
 user dashboard

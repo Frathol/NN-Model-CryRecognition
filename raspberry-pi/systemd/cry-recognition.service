@@ -9,8 +9,10 @@ Wants=pipewire.service wireplumber.service
 Type=simple
 WorkingDirectory=__CRY_DIR__
 EnvironmentFile=%h/.config/smart-incubator/cry.env
-# Tanda "-" = lanjut walau gagal (service akan menunggu mic & coba lagi sendiri)
-ExecStartPre=-__SCRIPTS_DIR__/connect_bt_mic.sh
+# Mic dipilih otomatis oleh cry_service.py: USB dulu (urut port), lalu Bluetooth
+# (BT_MIC_MAC di cry.env disambungkan sendiri lewat scripts/connect_bt_mic.sh).
+# Belum ada mic -> menunggu & langsung aktif saat mic dipasang (log: "Tidak ada mikrofon tersambung").
+Environment=PYTHONUNBUFFERED=1
 ExecStart=__CRY_DIR__/.venv/bin/python __CRY_DIR__/cry_service.py
 Restart=always
 RestartSec=5

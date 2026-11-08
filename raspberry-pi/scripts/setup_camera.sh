@@ -4,7 +4,7 @@
 #  - paket: picamera2 (kamera CSI), OpenCV (kamera USB), ffmpeg (rekaman MP4)
 #  - service systemd: incubator-camera (camera_service.py di 127.0.0.1:8081)
 #  - nginx: /camera/ dengan password (video bayi = data sensitif)
-#  - dashboard: menyalin index.html, app.js, style.css (config.js TIDAK disentuh)
+#  - dashboard: menyalin semua file dashboard (config.js tidak lagi berisi password)
 #
 #  Jalankan sebagai user biasa dari folder repo:
 #     cd smart-incubator/raspberry-pi && ./scripts/setup_camera.sh
@@ -66,8 +66,9 @@ sudo ln -sf /etc/nginx/sites-available/smart-incubator /etc/nginx/sites-enabled/
 sudo nginx -t
 sudo systemctl reload nginx
 
-step "Dashboard (index.html, app.js, style.css)"
-sudo cp "$PI_DIR/dashboard/index.html" "$PI_DIR/dashboard/app.js" "$PI_DIR/dashboard/style.css" "$WEB_ROOT/"
+step "Dashboard (semua file, termasuk halaman login)"
+# index.html memerlukan auth.js, login.html, login.js; config.js berisi daftar topic (termasuk FSM)
+sudo cp "$PI_DIR/dashboard/"*.html "$PI_DIR/dashboard/"*.js "$PI_DIR/dashboard/style.css" "$WEB_ROOT/"
 
 IP=$(hostname -I | awk '{print $1}')
 step "Selesai"

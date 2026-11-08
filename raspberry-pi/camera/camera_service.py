@@ -17,7 +17,8 @@ HTTP API (hanya 127.0.0.1; dari luar lewat nginx di /camera/ dengan password):
   DELETE /api/recordings/<file>    hapus rekaman
 
 Pemakaian:
-  python3 camera_service.py                      # kamera otomatis (CSI dulu, lalu USB)
+  python3 camera_service.py                      # kamera otomatis: CSI dulu, lalu USB urut port;
+                                                 # belum ada kamera -> menunggu, aktif saat dipasang
   python3 camera_service.py --backend usb --device 0
   python3 camera_service.py --backend test       # pola uji tanpa kamera
   python3 camera_service.py --list               # daftar kamera terdeteksi
@@ -66,11 +67,10 @@ class PiCamSource(Source):
     """Kamera CSI (Camera Module) lewat libcamera / picamera2."""
     name = "picamera2"
 
-    def __init__(self, width, height, fps):
+    def __init__(self, width, height, fps, num=0, label="CSI"):
         from picamera2 import Picamera2
-        if not Picamera2.global_camera_info():
-            raise RuntimeError("tidak ada kamera CSI terdeteksi oleh libcamera")
-        self.cam = Picamera2()
+        self.label = label
+        self.cam = Picamera2(num)
         frame_us = int(1_000_000 / fps)
         cfg = self.cam.create_video_configuration(
             main={"size": (width, height), "format": "RGB888"},   # RGB888 = urutan B,G,R (cocok untuk OpenCV)
@@ -89,43 +89,64 @@ class PiCamSource(Source):
             pass
 
 
+def natural_key(s: str):
+    return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", s)]
+
+
+def csi_cameras() -> list:
+    """[(nomor_libcamera, model, id)] kamera CSI saja, urut konektor (CAM0 lalu CAM1).
+
+    libcamera juga mendaftar webcam USB (UVC); itu dilewati di sini karena USB
+    ditangani terpisah (prioritas lebih rendah, urut port).
+    """
+    try:
+        from picamera2 import Picamera2
+        info = Picamera2.global_camera_info()
+    except Exception as e:   # noqa: BLE001
+        log.debug("picamera2: %s", e)
+        return []
+    out = []
+    for i, c in enumerate(info):
+        cid = str(c.get("Id", ""))
+        if "usb" in cid.lower():
+            continue
+        out.append((c.get("Num", i), c.get("Model", "?"), cid))
+    return out
+
+
 def usb_cameras() -> list:
-    """/dev/videoN milik kamera USB (node capture utama saja).
+    """[(/dev/videoN, nama, port)] kamera USB, urut port USB (port terendah dulu).
 
     Di Pi 5, /dev/video0.. dan /dev/video19..35 adalah perangkat internal (penerima CSI,
     ISP, decoder) yang BUKAN webcam; membukanya dengan OpenCV hanya menunggu timeout.
     Kamera USB dikenali dari jalurnya di /sys yang melewati bus USB.
     """
     found = []
-    base = Path("/sys/class/video4linux")
-
-    def num(p):
-        return int(p.name[5:]) if p.name[5:].isdigit() else 9999
-    for d in sorted(base.glob("video*"), key=num):
+    for d in Path("/sys/class/video4linux").glob("video*"):
         try:
-            if "/usb" not in os.path.realpath(d / "device"):
+            real = os.path.realpath(d / "device")
+            if "/usb" not in real:
                 continue
             idx = d / "index"
             if idx.exists() and idx.read_text().strip() != "0":
                 continue                       # node metadata, bukan gambar
             name = (d / "name").read_text().strip() if (d / "name").exists() else "?"
-            found.append((f"/dev/{d.name}", name))
+            ports = re.findall(r"/(\d+-[\d.]+)(?=/|$)", real)
+            found.append((f"/dev/{d.name}", name, ports[-1] if ports else "?", real))
         except OSError:
             continue
-    return found
+    found.sort(key=lambda c: natural_key(c[3]))   # urut jalur fisik = urut port
+    return [c[:3] for c in found]
 
 
 class UsbSource(Source):
     """Webcam USB (UVC) lewat OpenCV / V4L2."""
     name = "usb"
 
-    def __init__(self, device, width, height, fps):
-        if str(device) == "auto":
-            cams = usb_cameras()
-            if not cams:
-                raise RuntimeError("tidak ada kamera USB terpasang")
-            device = cams[0][0]
+    def __init__(self, device, width, height, fps, label=None):
         dev = f"/dev/video{device}" if str(device).isdigit() else device
+        self.dev = dev
+        self.label = label or f"USB {dev}"
         self.cap = cv2.VideoCapture(dev, cv2.CAP_V4L2)
         if not self.cap.isOpened():
             raise RuntimeError(f"kamera USB '{device}' tidak bisa dibuka")
@@ -169,23 +190,62 @@ class TestSource(Source):
         return img
 
 
+class NoCamera(RuntimeError):
+    pass
+
+
+FAILED_USB: set = set()   # kamera USB yang gagal dibuka; tidak dicoba "beralih" lagi sampai dicabut
+
+
 def open_source(args) -> Source:
+    """Buka kamera menurut prioritas: CSI (CAM0, CAM1) -> USB (urut port) .
+
+    --backend picamera2/usb membatasi jenisnya; --device N memaksa kamera USB tertentu.
+    """
     if args.backend == "test":
-        return TestSource(args.width, args.height, args.fps)
-    errors = []
+        src = TestSource(args.width, args.height, args.fps)
+        src.label = "test pattern"
+        return src
+    errors, tried = [], 0
     if args.backend in ("auto", "picamera2"):
-        try:
-            return PiCamSource(args.width, args.height, args.fps)
-        except Exception as e:   # noqa: BLE001
-            errors.append(f"CSI: {e}")
-            if args.backend == "picamera2":
-                raise RuntimeError("; ".join(errors)) from e
+        for num, model, _ in csi_cameras():
+            tried += 1
+            try:
+                return PiCamSource(args.width, args.height, args.fps, num, f"CSI #{num} {model}")
+            except Exception as e:   # noqa: BLE001
+                errors.append(f"CSI #{num}: {e}")
     if args.backend in ("auto", "usb"):
-        try:
-            return UsbSource(args.device, args.width, args.height, args.fps)
-        except Exception as e:   # noqa: BLE001
-            errors.append(f"USB: {e}")
-    raise RuntimeError("; ".join(errors) or "backend tidak dikenal")
+        if str(args.device) != "auto":
+            cams = [(args.device, "", "")]
+        else:
+            cams = usb_cameras()
+        for dev, name, port in cams:
+            tried += 1
+            label = f"USB {dev} {name}".strip() + (f", port USB {port}" if port else "")
+            try:
+                src = UsbSource(dev, args.width, args.height, args.fps, label)
+                FAILED_USB.discard(dev)
+                return src
+            except Exception as e:   # noqa: BLE001
+                FAILED_USB.add(dev)
+                errors.append(f"{label}: {e}")
+                log.warning("Kamera %s gagal dibuka (%s), coba berikutnya", label, e)
+    if not tried:
+        raise NoCamera("tidak ada kamera tersambung")
+    raise RuntimeError("; ".join(errors))
+
+
+def better_usb_waiting(src: Source) -> str | None:
+    """Saat memakai kamera USB: ada kamera USB lain di port yang lebih diutamakan?"""
+    cams = usb_cameras()
+    present = {c[0] for c in cams}
+    FAILED_USB.intersection_update(present)          # dicabut -> boleh dicoba lagi nanti
+    for dev, name, port in cams:
+        if dev == getattr(src, "dev", None):
+            return None                              # kamera sekarang sudah yang terbaik
+        if dev not in FAILED_USB:
+            return f"USB {dev} {name}, port USB {port}"
+    return None
 
 
 # ======================================================================
@@ -312,6 +372,10 @@ class Recorder:
 # ======================================================================
 #  Kamera: loop ambil gambar
 # ======================================================================
+class _SwitchCamera(Exception):
+    pass
+
+
 class Camera(threading.Thread):
     def __init__(self, args, recorder: Recorder):
         super().__init__(daemon=True)
@@ -326,25 +390,39 @@ class Camera(threading.Thread):
         self.running = True
 
     def run(self):
+        warned_at = -1e9
         while self.running:
             try:
                 self.src = open_source(self.args)
                 self.error = None
-                log.info("Kamera: %s %sx%s @ %s fps", self.src.name, *self.src.size, self.args.fps)
+                warned_at = -1e9
+                log.info("Kamera terdeteksi: %s %sx%s @ %s fps -> live view & rekaman AKTIF",
+                         getattr(self.src, "label", self.src.name), *self.src.size, self.args.fps)
                 self._loop()
+            except NoCamera as e:
+                self.error = "No camera connected (CSI / USB)"
+                if time.monotonic() - warned_at > 60:
+                    log.warning("Tidak ada kamera tersambung (CSI / USB). Menunggu kamera dipasang... "
+                                "(fitur aktif otomatis begitu kamera tersambung)")
+                    warned_at = time.monotonic()
+                log.debug("%s", e)
+            except _SwitchCamera as e:
+                log.info("Kamera prioritas lebih tinggi terpasang: %s -> beralih", e)
             except Exception as e:   # noqa: BLE001
                 self.error = str(e)
-                log.error("Kamera error: %s (coba lagi 5 dtk)", e)
+                log.error("Kamera error: %s (coba lagi)", e)
             finally:
                 if self.src:
                     self.src.close()
                 self.src = None
             if self.rec.active:
                 self.rec.stop()
-            time.sleep(5)
+            time.sleep(2)
 
     def _loop(self):
         fails, n, t_fps = 0, 0, time.monotonic()
+        auto_usb = self.src.name == "usb" and self.args.backend == "auto" and str(self.args.device) == "auto"
+        next_check = time.monotonic() + 5
         quality = [int(cv2.IMWRITE_JPEG_QUALITY), self.args.quality]
         rot = {90: cv2.ROTATE_90_CLOCKWISE, 180: cv2.ROTATE_180, 270: cv2.ROTATE_90_COUNTERCLOCKWISE}
         while self.running:
@@ -357,6 +435,11 @@ class Camera(threading.Thread):
                 continue
             fails = 0
             n += 1
+            if auto_usb and time.monotonic() >= next_check:
+                next_check = time.monotonic() + 5
+                better = better_usb_waiting(self.src)
+                if better:
+                    raise _SwitchCamera(better)
             if time.monotonic() - t_fps >= 2:
                 self.fps_measured = n / (time.monotonic() - t_fps)
                 n, t_fps = 0, time.monotonic()
@@ -399,6 +482,7 @@ class Camera(threading.Thread):
     def status(self) -> dict:
         return {"ok": self.src is not None and self.error is None,
                 "backend": self.src.name if self.src else None,
+                "camera": getattr(self.src, "label", None) if self.src else None,
                 "size": list(self.src.size) if self.src else None,
                 "fps": round(self.fps_measured, 1), "viewers": self.viewers,
                 "error": self.error}
@@ -569,19 +653,22 @@ def list_recordings(out_dir: Path) -> list:
 
 
 def list_cameras():
+    print("Kamera terdeteksi, urut prioritas (CSI dulu, lalu USB menurut port):")
+    n = 0
     try:
-        from picamera2 import Picamera2
-        for i, c in enumerate(Picamera2.global_camera_info()):
-            print(f"CSI  #{i}: {c.get('Model')}  {c.get('Id', '')}")
-        if not Picamera2.global_camera_info():
-            print("CSI  : tidak ada kamera CSI terdeteksi (cek kabel pita & konektor CAM/DISP)")
+        import picamera2  # noqa: F401
     except Exception as e:   # noqa: BLE001
-        print(f"CSI  : picamera2 tidak tersedia ({e})")
-    cams = usb_cameras()
-    for dev, name in cams:
-        print(f"USB  : {dev}  {name}  (pakai --backend usb --device {dev})")
-    if not cams:
-        print("USB  : tidak ada kamera USB terpasang")
+        print(f"  (picamera2 tidak tersedia, kamera CSI tidak bisa dicek: {e})")
+    for num, model, cid in csi_cameras():
+        n += 1
+        print(f"  {n}. CSI #{num}: {model}{'   <- dipakai' if n == 1 else ''}")
+        print(f"     {cid}")
+    for dev, name, port in usb_cameras():
+        n += 1
+        print(f"  {n}. USB {dev}: {name}, port USB {port}{'   <- dipakai' if n == 1 else ''}")
+    if not n:
+        print("  Tidak ada kamera tersambung (CSI / USB).")
+        print("  CSI: cek kabel pita (sisi kontak benar) & konektor CAM0/CAM1; USB: cek `lsusb`.")
 
 
 # ======================================================================
@@ -589,7 +676,7 @@ def main():
     ap = argparse.ArgumentParser(description="Layanan kamera Smart Incubator")
     ap.add_argument("--backend", choices=["auto", "picamera2", "usb", "test"], default="auto")
     ap.add_argument("--device", default="auto",
-                    help="kamera USB: auto (pertama yang terdeteksi), nomor N (/dev/videoN), atau path")
+                    help="kamera USB: auto (urut port, setelah CSI), nomor N (/dev/videoN), atau path")
     ap.add_argument("--width", type=int, default=1280)
     ap.add_argument("--height", type=int, default=720)
     ap.add_argument("--fps", type=int, default=15)

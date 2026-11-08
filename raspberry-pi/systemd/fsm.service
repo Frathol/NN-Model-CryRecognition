@@ -1,0 +1,18 @@
+# systemd USER service untuk mesin alarm FSM (fsm.py).
+# Dipasang oleh setup_pi.sh / setup_autostart.sh ke ~/.config/systemd/user/fsm.service
+# fsm.py subscribe incubator/# lalu publish keputusan alarm ke incubator/fsm/state (retained).
+[Unit]
+Description=Smart Incubator - FSM alarm engine
+After=network-online.target
+
+[Service]
+Type=simple
+# Password akun MQTT "fsm" (MQTT_PASSWORD=...), dibuat oleh setup_pi.sh
+EnvironmentFile=%h/.config/smart-incubator/fsm.env
+ExecStart=__CRY_DIR__/.venv/bin/python -u __FSM_PY__ --user fsm
+# Broker belum siap / koneksi putus -> fsm.py keluar, systemd menyalakan ulang
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

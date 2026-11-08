@@ -9,6 +9,9 @@ Type=simple
 User=__USER__
 SupplementaryGroups=video
 WorkingDirectory=__CAM_DIR__
+# Kamera dipilih otomatis: CSI dulu, lalu USB urut port. Belum ada kamera -> menunggu
+# & langsung aktif saat dipasang (log: "Tidak ada kamera tersambung").
+Environment=PYTHONUNBUFFERED=1
 # Ubah opsi di sini lalu: sudo systemctl daemon-reload && sudo systemctl restart incubator-camera
 ExecStart=/usr/bin/python3 __CAM_DIR__/camera_service.py --width 1280 --height 720 --fps 15 --record-dir __REC_DIR__ --max-minutes 30
 Restart=always

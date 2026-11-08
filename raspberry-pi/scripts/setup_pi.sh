@@ -42,9 +42,10 @@ sudo apt-get install -y mosquitto mosquitto-clients nginx \
 
 # ---------------------------------------------------------------------
 step "Konfigurasi Mosquitto"
-echo "Buat password untuk 4 akun MQTT: esp32, cryservice, dashboard, admin"
+echo "Buat password untuk 5 akun MQTT: esp32, cryservice, fsm, dashboard, admin"
 P_ESP=$(ask_pass esp32)
 P_CRY=$(ask_pass cryservice)
+P_FSM=$(ask_pass fsm)
 P_DASH=$(ask_pass dashboard)
 P_ADMIN=$(ask_pass admin)
 
@@ -52,6 +53,7 @@ sudo rm -f /etc/mosquitto/passwd
 sudo touch /etc/mosquitto/passwd
 sudo mosquitto_passwd -b /etc/mosquitto/passwd esp32      "$P_ESP"
 sudo mosquitto_passwd -b /etc/mosquitto/passwd cryservice "$P_CRY"
+sudo mosquitto_passwd -b /etc/mosquitto/passwd fsm        "$P_FSM"
 sudo mosquitto_passwd -b /etc/mosquitto/passwd dashboard  "$P_DASH"
 sudo mosquitto_passwd -b /etc/mosquitto/passwd admin      "$P_ADMIN"
 sudo chown root:mosquitto /etc/mosquitto/passwd && sudo chmod 640 /etc/mosquitto/passwd
@@ -68,9 +70,8 @@ sudo cp -r "$PI_DIR/dashboard/." "$WEB_ROOT/"
 # Simpan library JS secara lokal agar dashboard tetap jalan tanpa internet
 sudo curl -fsSL -o "$WEB_ROOT/vendor/mqtt.min.js"   https://unpkg.com/mqtt@5/dist/mqtt.min.js   || echo "(gagal unduh mqtt.js, dashboard akan memakai CDN)"
 sudo curl -fsSL -o "$WEB_ROOT/vendor/chart.umd.js"  https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.js || echo "(gagal unduh Chart.js, dashboard akan memakai CDN)"
-# Isi password dashboard (akun read-only) ke config.js
-ESC_DASH=$(printf '%s' "$P_DASH" | sed -e 's/[\/&|\\]/\\&/g')
-sudo sed -i "s|__DASHBOARD_PASSWORD__|$ESC_DASH|" "$WEB_ROOT/config.js"
+# Password dashboard TIDAK ditulis ke config.js: pengguna login di login.html
+# memakai akun MQTT (mis. "dashboard"), dan Mosquitto yang memeriksanya.
 
 sudo install -m 644 "$PI_DIR/nginx/smart-incubator.conf" /etc/nginx/sites-available/smart-incubator
 sudo ln -sf /etc/nginx/sites-available/smart-incubator /etc/nginx/sites-enabled/smart-incubator
@@ -99,13 +100,20 @@ cat > "$CONF_DIR/cry.env" <<EOF
 MQTT_PASSWORD=$P_CRY
 BT_MIC_MAC=$BT_MAC
 EOF
+cat > "$CONF_DIR/fsm.env" <<EOF
+MQTT_PASSWORD=$P_FSM
+EOF
 umask 022
 
 mkdir -p "$HOME/.config/systemd/user"
 sed -e "s|__CRY_DIR__|$CRY_DIR|g" -e "s|__SCRIPTS_DIR__|$SCRIPTS_DIR|g" \
   "$PI_DIR/systemd/cry-recognition.service" > "$HOME/.config/systemd/user/cry-recognition.service"
+# Mesin alarm FSM (fsm.py di root repo), memakai venv cry-recognition (sudah berisi paho-mqtt)
+sed -e "s|__CRY_DIR__|$CRY_DIR|g" -e "s|__FSM_PY__|$(cd "$PI_DIR/.." && pwd)/fsm.py|g" \
+  "$PI_DIR/systemd/fsm.service" > "$HOME/.config/systemd/user/fsm.service"
 systemctl --user daemon-reload
 systemctl --user enable cry-recognition.service
+systemctl --user enable --now fsm.service
 # Agar user service tetap jalan setelah boot tanpa login
 sudo loginctl enable-linger "$USER"
 

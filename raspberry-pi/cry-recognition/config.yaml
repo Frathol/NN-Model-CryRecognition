@@ -11,9 +11,11 @@ mqtt:
   topic_prefix: incubator/cry  # .../result, .../state, .../status
 
 audio:
-  # null  = sumber input default PipeWire (set mic Bluetooth sebagai default)
-  # "teks" = pilih perangkat input yang namanya mengandung teks ini
-  # angka = index perangkat (lihat: python cry_service.py --list-devices)
+  # null = OTOMATIS: mic USB diutamakan (beberapa USB -> urut port), lalu mic Bluetooth
+  #        (BT_MIC_MAC di ~/.config/smart-incubator/cry.env disambungkan otomatis).
+  #        Belum ada mic -> layanan menunggu & langsung aktif saat mic dipasang.
+  # "teks" = paksa perangkat input yang namanya mengandung teks ini (tanpa prioritas)
+  # angka  = paksa index perangkat (lihat: python cry_service.py --list-devices)
   device: null
   capture_rate: 16000          # mic Bluetooth (profil HFP) biasanya 16 kHz / 8 kHz
   channels: 1
@@ -48,10 +50,12 @@ features:
   normalize: none     # none | standardize | minmax  (per-sampel)
 
 # Nilai di bawah mengikuti model 2 tahap (model/stage1_norm.json):
-# jendela 1 dtk geser 0,5 dtk, hening < -50 dBFS, ambang 0,85, 3 jendela berturut-turut.
+# jendela 1 dtk geser 0,5 dtk, hening < -50 dBFS, ambang 0,85, 3 jendela berturut-turut,
+# dilengkapi Simple Moving Average (SMA) untuk meredam jeda tarik napas bayi.
 inference:
   hop_seconds: 0.5         # jalankan inferensi tiap N detik (jendela bergeser)
   silence_db: -50          # di bawah level ini dianggap hening, inferensi dilewati
   cry_threshold: 0.85      # probabilitas minimum dianggap menangis (tahap 2 jalan di atas ini)
+  sma_window: 4            # panjang buffer Simple Moving Average (4 jendela = 2.0 detik)
   consecutive_for_alert: 3 # jumlah jendela berturut-turut sebelum status "menangis"
-  clear_after: 2           # jumlah jendela non-cry sebelum status kembali tenang
+  clear_after: 6           # jumlah jendela non-cry (3.0 detik) sebelum status kembali tenang

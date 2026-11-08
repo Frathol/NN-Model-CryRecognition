@@ -12,13 +12,13 @@ TOPIC_CMD = "incubator/cmd/setpoint"          # perintah: {"setpoint": 33.0}
 TOPIC_FSM_STATE = "incubator/fsm/state"       # keluaran FSM (retained)
 
 PRIORITY = [
-    "CODE_BLUE",
-    "VITAL_SIGN_ALERT",
+    "CODE_BLUE",          # suhu kulit / detak jantung di luar batas aman (atau manual)
     "THERMAL_HAZARD",
     "HUMIDITY_HAZARD",
     "MAINS_FAIL",
     "SENSOR_FAULT",
     "CRYING_DISTRESS",
+    "VITAL_SIGN_ALERT",   # peringatan: detak jantung 161-180 BPM tanpa tangisan selama tunda
     "INACTIVITY_INFO",
     "POWER_WARNING",
     "IDLE_NORMAL"
@@ -29,16 +29,34 @@ parser.add_argument("--broker", default="localhost")
 parser.add_argument("--port", type=int, default=1883)
 parser.add_argument("--user", default="fsm")
 parser.add_argument("--password", default=os.environ.get("MQTT_PASSWORD", ""))
+parser.add_argument("--hr-high-delay", type=float, default=180.0,
+                    help="detik detak jantung tinggi harus bertahan sebelum alarm, dipakai HANYA bila ESP32 "
+                         "tidak mengirim alarm.hr_high_delay_s (uji resmi 180; demo boleh 30)")
 args = parser.parse_args()
+
+# ---------------------------------------------------------------------------
+#  VITAL LIMITS - HARUS SAMA dengan raspberry-pi/dashboard/config.js
+#  Sumber: dokumen "Sumber Rujukan Batas Alarm Dashboard Smart Incubator"
+# ---------------------------------------------------------------------------
+SKIN_SAFE = (36.2, 37.5)        # degC; di luar ini -> CODE_BLUE langsung (NHS WoS 36.2; CMNRP 37.5)
+HR_NORMAL_MAX = 160             # BPM; di atas ini = di atas normal (ASU / CAHS 120-160)
+HR_CRYING_MAX = 180             # BPM; saat bayi menangis 161-180 dianggap wajar (ASU)
+HR_CODE_BLUE = (100, 180)       # BPM; < 100 atau > 180 -> CODE_BLUE setelah tunda
+HR_DELAY_LOW = 10.0             # detik; bradikardia (NICU tanpa tunda; 10 dtk = 2 kiriman ESP32)
+HR_DELAY_HIGH = args.hr_high_delay  # detik; cadangan bila ESP32 tidak mengirim tunda (Erasmus MC: 180 dtk)
+HR_DELAY_RANGE = (5.0, 600.0)   # detik; tunda dari ESP32 di luar rentang ini diabaikan
+DELAY_TOLERANCE = 1.0           # detik; kiriman ESP32 tiap ~5 dtk tidak pernah tepat
 
 state_ctx = {
     "setpoint_temp": 33.0,
     "delta_temp": 1.0,
     "t_air": 33.0, "rh": 60.0,
-    "t_skin": 36.5, "hr": 130, "weight_g": 2500,
+    "t_skin": None, "hr": None, "weight_g": None,   # None = sensor tidak mengirim data
     "cry": False, "cry_since": None, "cry_reason": "none", "cry_reason_conf": 0.0,
     "mains_ok": True, "soc": 100.0,
-    "code_blue": False,
+    "code_blue": False,      # Code Blue manual (perintah dashboard lokal), belum dipakai
+    "hr_since": {"low": None, "high": None, "elevated": None},   # awal tiap kondisi detak jantung
+    "hr_delay_high": HR_DELAY_HIGH,   # diganti oleh alarm.hr_high_delay_s dari ESP32 (DEMO_FAST_DELAY)
     "node_status": {"esp": "online", "audio": "online"},
     "last_seen": {"env": time.time(), "audio": time.time()}
 }
@@ -56,13 +74,41 @@ def evaluate_fsm():
     ):
         active.append("SENSOR_FAULT")
 
-    # 2. Cek Code Blue Lokal
-    if state_ctx["code_blue"]:
-        active.append("CODE_BLUE")
+    # 2+3. Code Blue (suhu kulit / detak jantung) dan peringatan detak jantung tinggi
+    #      Aturan sama dengan dashboard (config.js). Hanya dinilai jika data sensor masih segar,
+    #      supaya nilai lama dari ESP32 yang terputus tidak memicu alarm.
+    fresh = now - state_ctx["last_seen"]["env"] <= 10.0
+    t_skin = state_ctx["t_skin"] if fresh else None
+    hr = state_ctx["hr"] if fresh else None
+    code_blue_reasons = []
+    if t_skin is not None and not (SKIN_SAFE[0] <= t_skin <= SKIN_SAFE[1]):
+        code_blue_reasons.append(
+            f"skin temperature {t_skin:.1f} C outside {SKIN_SAFE[0]}-{SKIN_SAFE[1]} C")
 
-    # 3. Cek Tanda Vital
-    if not (36.0 <= state_ctx["t_skin"] <= 37.5) or not (100 <= state_ctx["hr"] <= 180):
-        active.append("VITAL_SIGN_ALERT")
+    since = state_ctx["hr_since"]
+    low = hr is not None and hr < HR_CODE_BLUE[0]
+    high = hr is not None and hr > HR_CODE_BLUE[1]
+    elevated = hr is not None and not high and hr > HR_NORMAL_MAX
+    # Hasil deteksi tangis hanya menjelaskan 161-180 BPM; tidak pernah memicu/membatalkan Code Blue
+    elevated_alone = elevated and not (state_ctx["cry"] and hr <= HR_CRYING_MAX)
+    for key, cond in (("low", low), ("high", high), ("elevated", elevated_alone)):
+        since[key] = (since[key] or now) if cond else None
+
+    def held(key, sec):
+        return since[key] is not None and now - since[key] >= sec - DELAY_TOLERANCE
+
+    if held("low", HR_DELAY_LOW):
+        code_blue_reasons.append(f"heart rate {hr} BPM too slow (< {HR_CODE_BLUE[0]})")
+    delay_high = state_ctx["hr_delay_high"]
+    if held("high", delay_high):
+        code_blue_reasons.append(f"heart rate {hr} BPM too fast (> {HR_CODE_BLUE[1]})")
+
+    if state_ctx["code_blue"] or code_blue_reasons:
+        active.append("CODE_BLUE")
+        advisories.append("CODE BLUE: " + "; ".join(code_blue_reasons or ["manual"]) + ". Check the infant now.")
+    if held("elevated", delay_high):
+        active.append("VITAL_SIGN_ALERT")   # dipakai sebagai: detak jantung di atas normal (peringatan)
+        advisories.append(f"Heart rate {hr} BPM above {HR_NORMAL_MAX} for more than {int(delay_high)} s.")
 
     # 4. Cek Suhu Kabin (Setpoint +/- Delta)
     sp, dt = state_ctx["setpoint_temp"], state_ctx["delta_temp"]
@@ -111,7 +157,7 @@ def evaluate_fsm():
     top_state = next((s for s in PRIORITY if s in active), "IDLE_NORMAL")
     in_cabin_buzzer = top_state in ("CODE_BLUE",)
     in_cabin_led = "GREEN" if top_state == "IDLE_NORMAL" else (
-        "RED" if top_state in ("CODE_BLUE", "VITAL_SIGN_ALERT", "THERMAL_HAZARD", "SENSOR_FAULT") else "YELLOW"
+        "RED" if top_state in ("CODE_BLUE", "THERMAL_HAZARD", "SENSOR_FAULT") else "YELLOW"
     )
 
     return {
@@ -129,7 +175,8 @@ def evaluate_fsm():
             "cry": state_ctx["cry"],
             "cry_reason_advisory": state_ctx["cry_reason"],
             "cry_reason_conf": state_ctx["cry_reason_conf"],
-            "soc": state_ctx["soc"]
+            "soc": state_ctx["soc"],
+            "hr_high_delay_s": state_ctx["hr_delay_high"]
         }
     }
 
@@ -161,8 +208,23 @@ def on_message(client, userdata, msg):
             hr = _num(heart.get("bpm")) if heart.get("contact") else None
             if t_air is not None: state_ctx["t_air"] = t_air
             if rh is not None: state_ctx["rh"] = rh
-            if t_skin is not None: state_ctx["t_skin"] = t_skin
-            if hr is not None: state_ctx["hr"] = int(hr)
+            # Suhu kulit & HR: tidak ada data / sensor lepas -> None (bukan nilai lama)
+            state_ctx["t_skin"] = t_skin
+            state_ctx["hr"] = int(hr) if hr is not None else None
+            # Daya: firmware mengirim {"power": {"soc_pct": .., "mains_ok": ..}}
+            pw = data.get("power") or {}
+            if isinstance(pw.get("mains_ok"), bool):
+                state_ctx["mains_ok"] = pw["mains_ok"]
+            soc = _num(pw.get("soc_pct"))
+            if soc is not None:
+                state_ctx["soc"] = soc
+            wt = data.get("weight") or {}
+            state_ctx["weight_g"] = _num(wt.get("g", wt.get("total_g")))
+            # Lama tunda detak jantung tinggi mengikuti ESP32 (DEMO_FAST_DELAY: 30 / 180 dtk)
+            d = _num((data.get("alarm") or {}).get("hr_high_delay_s"))
+            if d is not None and HR_DELAY_RANGE[0] <= d <= HR_DELAY_RANGE[1] and d != state_ctx["hr_delay_high"]:
+                print(f"[FSM] Tunda detak jantung tinggi dari ESP32: {d:g} dtk (sebelumnya {state_ctx['hr_delay_high']:g})")
+                state_ctx["hr_delay_high"] = d
             state_ctx["last_seen"]["env"] = time.time()
         elif topic == TOPIC_ESP_STATUS:
             state_ctx["node_status"]["esp"] = payload_raw.strip()

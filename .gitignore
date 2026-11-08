@@ -1,3 +1,17 @@
 .venv/*
 donateacry-corpus/
 ESC-50/
+# Python cache
+__pycache__/
+*.pyc
+
+# File uji lokal (foto/video kamera, rekaman audio, log eksperimen)
+raspberry-pi/*.jpg
+raspberry-pi/*.h264
+raspberry-pi/*.mp4
+raspberry-pi/cry-recognition/*.wav
+raspberry-pi/scripts/mqtt_csv/
+eksperimen_log.csv
+
+# Backup lokal sebelum perubahan (jangan di-commit)
+backup/

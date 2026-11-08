@@ -163,3 +163,96 @@ Buka `http://<ip-pi>/` dari perangkat di jaringan yang sama. Batas alarm
 Sistem ini alat bantu pemantauan, **bukan perangkat medis tersertifikasi**. Jangan
 jadikan satu-satunya dasar keputusan klinis; kalibrasi sensor suhu terhadap
 termometer referensi, dan tentukan batas alarm bersama tenaga medis.
+
+---
+
+# Incubator Cry Detection System Architecture
+
+This document details the architectural flow, data pipelines, and MQTT topics for the **Incubator Cry Detection System**.
+
+---
+
+## 1. System Flow Diagram
+
+```
++--------------------------+
+|  Mic (Bluetooth) / WAV   |
++--------------------------+
+            |
+            v
++-------------------------------------------------------------+
+|                     cry_service.py                          |
+|  - Powered by 2-Stage Model (two_stage_model.py + features) |
++-------------------------------------------------------------+
+            |
+            | [Publishes MQTT Messages]
+            +-----------------------+-----------------------+
+            |                       |                       |
+            v                       v                       v
+incubator/cry/result     incubator/cry/state      incubator/cry/status
+(every 0.5s per window)  (on state change, ret.)  (online/no_mic/offline)
+            |                       |                       |
+            +-----------------------+-----------------------+
+                                    |
+                                    v
+                        +--------------------------+
+                        |     Mosquitto Broker     |
+                        +--------------------------+
+                                    |
+                                    v
+                        +--------------------------+
+                        |       nginx /mqtt        |
+                        +--------------------------+
+                                    |
+                                    v
+                        +--------------------------+
+                        |      Web Browser         |
+                        +--------------------------+
+                                    |
+                                    v
+                        +--------------------------+
+                        |          app.js          |
+                        | (Updates index.html &    |
+                        |   styled by style.css)   |
+                        +--------------------------+
+```
+
+---
+
+## 2. Component Breakdown
+
+### A. Input Layer
+* **Audio Input Sources:**
+* Bluetooth Microphone stream
+* Local `.wav` audio files (for testing/simulation)
+
+### B. Processing Core (`cry_service.py`)
+* **Machine Learning Engine:** Two-stage classifier model consisting of:
+* `two_stage_model.py`: Model architecture and inference logic.
+* `features.py`: Audio feature extraction pipeline.
+* **Role:** Processes incoming audio frames in real time and classifies cry states.
+
+### C. Messaging Layer (MQTT via Mosquitto)
+The processing service broadcasts inferences and telemetry across three primary MQTT topics:
+
+| Topic | Frequency / Trigger | Retained | Purpose |
+| :--- | :--- | :--- | :--- |
+| `incubator/cry/result` | Every 0.5s | No | Continuous audio window inference results. |
+| `incubator/cry/state` | On state change | Yes | Current aggregated cry status (e.g., Crying, Silence, Unknown). |
+| `incubator/cry/status` | Telemetry / Lifecycle | Yes | Health status (`online`, `no_mic`, `offline`). |
+
+### D. Reverse Proxy & Frontend Integration
+* **Nginx:** Acts as a reverse proxy routing WebSockets (`/mqtt`) from the client browser to the Mosquitto MQTT broker.
+* **Web Client:**
+* `index.html`: UI structure.
+* `style.css`: Presentation styling.
+* `app.js`: WebSockets listener subscribing to MQTT topics and dynamically updating UI DOM elements.
+
+---
+
+## 3. Data Flow Steps
+
+1. **Audio Capture & Analysis:** `cry_service.py` receives live audio input or reads a `.wav` file, extracts features via `features.py`, and evaluates predictions using `two_stage_model.py`.
+2. **MQTT Publishing:** Results are pushed to `Mosquitto` at defined intervals (0.5s for raw results, event-driven for state changes).
+3. **Proxy Routing:** Nginx proxies the MQTT WebSockets protocol to client connections.
+4. **UI Render:** `app.js` processes incoming MQTT messages in real time and updates `index.html` to alert users of baby cry events and system health.

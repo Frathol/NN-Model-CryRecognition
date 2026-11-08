@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Layanan cry recognition Smart Incubator (Raspberry Pi 5).
+Layanan cry recognition Smart Incubator (Raspberry Pi 5) dengan Simple Moving Average (SMA).
 
-Mic Bluetooth (PipeWire) -> buffer audio -> model TFLite 2 tahap -> MQTT
+Mic (USB diutamakan, lalu Bluetooth) -> buffer audio -> model TFLite 2 tahap -> SMA Smoothing -> MQTT
 Topic (prefix default incubator/cry):
-  .../result  hasil tiap jendela  {label, cry_prob, level_db, reason, source, ...}
+  .../result  hasil tiap jendela  {label, cry_prob, raw_cry_prob, level_db, reason, source, ...}
   .../state   status menangis (retained) {crying, since, cry_prob, reason, reason_conf}
   .../status  online | no_mic | offline (retained, LWT)
 
@@ -13,7 +13,11 @@ Pemakaian:
   python cry_service.py --replay a.wav        # OFFLINE: putar file (real-time) -> dashboard
   python cry_service.py --replay a.wav --loop # ulangi terus
   python cry_service.py --test-file a.wav     # uji model pada file (tanpa mic/MQTT)
-  python cry_service.py --list-devices        # daftar perangkat audio input
+  python cry_service.py --list-devices        # daftar mic (urut prioritas) & perangkat audio
+
+Mic dipilih otomatis (audio.device: null di config.yaml): USB > Bluetooth, beberapa USB
+diurutkan menurut port. Jika belum ada mic, layanan menunggu dan langsung aktif begitu
+mic dipasang; mic USB yang dipasang belakangan otomatis menggantikan mic Bluetooth.
 """
 from __future__ import annotations
 
@@ -33,6 +37,7 @@ import numpy as np
 import yaml
 
 from cry_model import CryModel, load_labels
+import mic_select
 
 BASE = Path(__file__).resolve().parent
 log = logging.getLogger("cry_service")
@@ -96,7 +101,7 @@ class AudioRing:
         """Dipanggil jika mic ternyata berjalan di sample rate lain."""
         with self.lock:
             self.rate = rate
-            self.buf = deque(maxlen=int(self.seconds * rate))
+            self.buf = deque(maxlen=int(seconds * rate)) if (seconds := self.seconds) else deque()
             self.last_data = time.monotonic()
 
     def push(self, block: np.ndarray):
@@ -122,11 +127,14 @@ def find_device(spec):
     raise RuntimeError(f"Perangkat input '{spec}' tidak ditemukan")
 
 
-def open_stream(cfg: dict, ring: AudioRing):
-    """Buka stream input; jika rate tidak didukung, pakai rate default perangkat."""
+def open_stream(cfg: dict, ring: AudioRing, mic=None):
+    """Buka stream input; jika rate tidak didukung, pakai rate default perangkat.
+
+    mic = mic_select.Mic (mode otomatis) atau None (pakai audio.device dari config).
+    """
     import sounddevice as sd
     acfg = cfg["audio"]
-    dev = find_device(acfg.get("device"))
+    dev = mic_select.activate(mic) if mic is not None else find_device(acfg.get("device"))
     channels = int(acfg.get("channels", 1))
 
     def cb(indata, frames, t, status):
@@ -143,11 +151,15 @@ def open_stream(cfg: dict, ring: AudioRing):
             s = sd.InputStream(device=dev, channels=channels, samplerate=r, dtype="float32",
                                blocksize=int(r * 0.1), callback=cb)
             s.start()
-            log.info("Mic: '%s' @ %d Hz", info["name"], r)
+            log.info("Mic dibuka @ %d Hz (%s)", r, mic.label() if mic else info["name"])
             return s, r
         except Exception as e:   # noqa: BLE001
             last_err = e
     raise RuntimeError(f"Gagal membuka mic: {last_err}")
+
+
+class _SwitchMic(Exception):
+    """Ada mic dengan prioritas lebih tinggi -> tutup stream & buka mic baru."""
 
 
 # ----------------------------------------------------------------------
@@ -163,10 +175,17 @@ class CryService:
         self.cry_since = None
         self.pos_streak = 0
         self.neg_streak = 0
-        self.reason_buf = deque(maxlen=5)   # probabilitas tahap 2 dari jendela tangisan terakhir
+
+        # Buffer Simple Moving Average (SMA) untuk meredam fluktuasi saat jeda napas
+        sma_len = int(cfg["inference"].get("sma_window", getattr(self.model, "consecutive", 4)))
+        self.prob_buf = deque(maxlen=max(1, sma_len))
+
+        # Buffer probabilitas tahap 2 dari jendela tangisan terakhir
+        self.reason_buf = deque(maxlen=5)
         self.reason, self.reason_conf = "none", 0.0
-        self.source = "mic"                 # "mic" (online) atau "replay:<file>" (offline)
+        self.source = "mic"
         self.connected = threading.Event()
+        self.status_now = "starting"
 
         m = cfg["mqtt"]
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=m["client_id"])
@@ -181,13 +200,14 @@ class CryService:
     def _on_connect(self, client, userdata, flags, rc, props=None):
         if rc == 0:
             log.info("MQTT terhubung")
-            self._status("online")
+            self._status(self.status_now)        # kirim ulang status terakhir (online / no_mic)
             self._publish_state(force=True)
             self.connected.set()
         else:
             log.error("MQTT ditolak: %s (cek username/password & ACL)", rc)
 
     def _status(self, s: str):
+        self.status_now = s
         self.client.publish(f"{self.prefix}/status", s, qos=1, retain=True)
 
     def _publish_state(self, cry_prob: float = 0.0, force: bool = False):
@@ -212,48 +232,84 @@ class CryService:
                 return labels[i], round(float(mean[i]), 3)
         return "none", 0.0
 
-    def _update_state(self, cry_prob: float, is_cry: bool, reason=("none", 0.0)):
+    def _update_state(self, sma_prob: float, raw_is_cry: bool, reason=("none", 0.0)):
         inf = self.cfg["inference"]
-        if is_cry:
-            self.pos_streak += 1; self.neg_streak = 0
+        thr = float(inf.get("cry_threshold", getattr(self.model, "threshold", 0.85)))
+        consec_alert = int(inf.get("consecutive_for_alert", 3))
+        clear_after = int(inf.get("clear_after", 6))
+
+        if raw_is_cry:
+            self.pos_streak += 1
+            self.neg_streak = 0
         else:
-            self.neg_streak += 1; self.pos_streak = 0
+            self.neg_streak += 1
+            self.pos_streak = 0
+
+        # Syarat mulai menangis: streak terpenuhi ATAU rata-rata SMA penuh >= threshold
+        sma_ready = len(self.prob_buf) >= consec_alert and sma_prob >= thr
 
         changed = False
-        if not self.crying and self.pos_streak >= int(inf.get("consecutive_for_alert", 2)):
+        if not self.crying and (self.pos_streak >= consec_alert or sma_ready):
             self.crying, self.cry_since, changed = True, time.time(), True
-            log.warning("BAYI MENANGIS terdeteksi (p=%.2f, alasan: %s)", cry_prob, reason[0])
-        elif self.crying and self.neg_streak >= int(inf.get("clear_after", 3)):
+            log.warning("BAYI MENANGIS terdeteksi (SMA=%.2f, alasan: %s)", sma_prob, reason[0])
+        elif self.crying and self.neg_streak >= clear_after and sma_prob < (thr * 0.5):
+            # Kembali tenang hanya jika sudah hening selama clear_after jendela DAN nilai SMA turun
             self.crying, self.cry_since, changed = False, None, True
             self.reason_buf.clear()
-            log.info("Tangisan berhenti")
+            self.prob_buf.clear()
+            log.info("Tangisan berhenti (kembali tenang)")
+
         if not self.crying:
             self.reason, self.reason_conf = "none", 0.0
-        elif reason[0] != "none":            # jendela tanpa tahap 2 -> pertahankan alasan terakhir
+        elif reason[0] != "none":
             if reason[0] != self.reason:
-                changed = True               # alasan tangisan berubah -> kirim ulang status
+                changed = True
             self.reason, self.reason_conf = reason
+
         if changed:
-            self._publish_state(cry_prob)
+            self._publish_state(sma_prob)
 
     def process_window(self, y: np.ndarray):
-        """Satu jendela audio (sudah di sample rate model) -> publish result & state."""
+        """Satu jendela audio (sudah di sample rate model) -> hitung SMA -> publish result & state."""
         inf = self.cfg["inference"]
-        thr = float(inf.get("cry_threshold", getattr(self.model, "threshold", 0.6)))
+        thr = float(inf.get("cry_threshold", getattr(self.model, "threshold", 0.85)))
         db = level_db(y)
-        if db < float(inf.get("silence_db", -55)):
+        if db < float(inf.get("silence_db", -50)):
             res = {"label": "silence", "confidence": 1.0, "cry_prob": 0.0, "probabilities": {}}
-            is_cry = False
+            raw_is_cry = False
         else:
             t0 = time.perf_counter()
             res = self.model.predict(y)
             res["latency_ms"] = round((time.perf_counter() - t0) * 1000, 1)
-            is_cry = res["cry_prob"] >= thr
+            raw_is_cry = res["cry_prob"] >= thr
 
-        reason = self._update_reason(res, is_cry)
-        self._update_state(res["cry_prob"], is_cry, reason)
-        res.update({"level_db": round(db, 1), "is_cry": is_cry, "source": self.source,
-                    "reason": self.reason, "reason_conf": self.reason_conf, "ts": time.time()})
+        # Hitung Simple Moving Average (SMA) dari beberapa jendela terakhir
+        raw_prob = float(res["cry_prob"])
+        self.prob_buf.append(raw_prob)
+        sma_prob = round(float(np.mean(self.prob_buf)), 4)
+
+        reason = self._update_reason(res, raw_is_cry)
+        self._update_state(sma_prob, raw_is_cry, reason)
+
+        # Saat status masih "crying" (misal sedang jeda tarik napas), jaga label tetap "cry"
+        # dan kirim nilai SMA ke cry_prob agar grafik & meteran di dashboard tidak anjlok ke 0
+        effective_is_cry = raw_is_cry or self.crying
+        if self.crying and res["label"] != "cry":
+            res["label"] = "cry"
+            # confidence = keyakinan untuk label yang dikirim; label dipaksa "cry" oleh status
+            # menangis (SMA), jadi pakai nilai SMA, bukan probabilitas non_cry dari model
+            res["confidence"] = sma_prob
+
+        res.update({
+            "raw_cry_prob": round(raw_prob, 4),
+            "cry_prob": sma_prob,
+            "level_db": round(db, 1),
+            "is_cry": effective_is_cry,
+            "source": self.source,
+            "reason": self.reason,
+            "reason_conf": self.reason_conf,
+            "ts": time.time(),
+        })
         self.client.publish(f"{self.prefix}/result", json.dumps(res), qos=0)
         log.debug("%s", res)
         return res
@@ -263,7 +319,7 @@ class CryService:
         """Mode OFFLINE: putar file audio dengan kecepatan real-time, hasil dikirim ke MQTT."""
         import soundfile as sf
         plan = self.model.plan
-        hop_s = float(self.cfg["inference"].get("hop_seconds", 1.0))
+        hop_s = float(self.cfg["inference"].get("hop_seconds", 0.5))
         y, sr = sf.read(path, dtype="float32", always_2d=True)
         y = resample(y.mean(axis=1), sr, plan.sample_rate)
         win, hop = plan.window_samples, int(hop_s * plan.sample_rate)
@@ -282,27 +338,81 @@ class CryService:
                 if self.stop.wait(hop_s):
                     return
                 res = self.process_window(y[start:start + win])
-                log.info("%6.1fs  P(cry)=%.3f  %-8s %s", start / plan.sample_rate, res["cry_prob"],
+                log.info("%6.1fs  raw=%.3f  SMA=%.3f  %-8s %s",
+                         start / plan.sample_rate, res["raw_cry_prob"], res["cry_prob"],
                          res["label"], f"-> MENANGIS ({self.reason})" if self.crying else "")
             if not loop:
                 break
         # selesai: kosongkan status menangis
-        for _ in range(int(self.cfg["inference"].get("clear_after", 3))):
+        clear_n = int(self.cfg["inference"].get("clear_after", 6)) + len(self.prob_buf)
+        for _ in range(clear_n):
+            self.prob_buf.append(0.0)
             self._update_state(0.0, False)
         log.info("Replay selesai")
 
     # ------------------------------------------------------------------
+    def _auto_mic(self) -> bool:
+        return self.cfg["audio"].get("device") in (None, "", "auto")
+
+    def _wait_for_mic(self):
+        """Tunggu sampai ada mic. Mode otomatis -> Mic terbaik; mode manual -> None."""
+        if not self._auto_mic():
+            return None
+        warned_at, bt_tried = -1e9, -1e9
+        bt_mac = os.environ.get("BT_MIC_MAC", "").strip()
+        while not self.stop.is_set():
+            mic = mic_select.best_mic()
+            now = time.monotonic()
+            # belum ada mic USB/Bluetooth -> coba sambungkan mic Bluetooth yang sudah dipairing
+            if bt_mac and (mic is None or mic.kind == "other") and now - bt_tried > 30:
+                bt_tried = now
+                log.info("Mencoba menyambungkan mic Bluetooth %s ...", bt_mac)
+                if mic_select.try_connect_bluetooth():
+                    continue
+            if mic is not None:
+                log.info("Mikrofon terdeteksi: %s -> deteksi tangisan AKTIF", mic.label())
+                return mic
+            if now - warned_at > 60:
+                log.warning("Tidak ada mikrofon tersambung (USB / Bluetooth). "
+                            "Menunggu mikrofon dipasang... (fitur aktif otomatis begitu mic tersambung)")
+                self._status("no_mic")
+                warned_at = now
+            self.stop.wait(2)
+        return None
+
+    def _check_mic(self, mic) -> None:
+        """Dipanggil berkala saat merekam: mic terlepas / ada mic prioritas lebih tinggi."""
+        mics, _ = mic_select.list_mics()
+        if not any(m.key == mic.key for m in mics):
+            raise RuntimeError(f"mikrofon terlepas: {mic.label()}")
+        best = mics[0]
+        if best.key != mic.key and mic_select.rank(best) < mic_select.rank(mic):
+            log.info("Mic prioritas lebih tinggi terpasang: %s -> beralih", best.label())
+            raise _SwitchMic()
+
+    def _clear_crying(self):
+        """Mic hilang -> jangan biarkan status "menangis" menggantung (sama seperti akhir replay)."""
+        for _ in range(int(self.cfg["inference"].get("clear_after", 6)) + len(self.prob_buf) + 1):
+            if not self.crying:
+                break                                # _update_state sudah mengosongkan buffer SMA
+            self.prob_buf.append(0.0)
+            self._update_state(0.0, False)
+        self.prob_buf.clear()                        # mic baru mulai dari buffer bersih
+
     def run(self):
         inf = self.cfg["inference"]
         plan = self.model.plan
-        hop_s = float(inf.get("hop_seconds", 1.0))
+        hop_s = float(inf.get("hop_seconds", 0.5))
         win_s = plan.window_samples / plan.sample_rate
         self.source = "mic"
 
         while not self.stop.is_set():
+            mic = self._wait_for_mic()
+            if self.stop.is_set():
+                break
             ring = AudioRing(win_s + 2.0, int(self.cfg["audio"].get("capture_rate", 16000)))
             try:
-                stream, cap_rate = open_stream(self.cfg, ring)
+                stream, cap_rate = open_stream(self.cfg, ring, mic)
                 if cap_rate != ring.rate:
                     ring.reset(cap_rate)
             except Exception as e:   # noqa: BLE001
@@ -313,26 +423,33 @@ class CryService:
 
             self._status("online")
             need = int(win_s * cap_rate)
+            next_check = time.monotonic() + 5
             try:
                 while not self.stop.is_set():
                     if self.stop.wait(hop_s):
                         break
+                    if mic is not None and time.monotonic() >= next_check:
+                        next_check = time.monotonic() + 5
+                        self._check_mic(mic)
                     if time.monotonic() - ring.last_data > 3.0:
-                        raise RuntimeError("tidak ada data audio (mic Bluetooth terputus?)")
+                        raise RuntimeError("tidak ada data audio (mic terputus?)")
                     raw = ring.latest(need)
                     if len(raw) < need * 0.9:
                         continue   # buffer belum penuh
                     y = resample(raw, cap_rate, plan.sample_rate)[:plan.window_samples]
                     self.process_window(y)
+            except _SwitchMic:
+                pass
             except Exception as e:   # noqa: BLE001
-                log.error("Stream audio error: %s", e)
+                log.warning("Mic berhenti: %s", e)
                 self._status("no_mic")
+                self._clear_crying()
             finally:
                 try:
                     stream.stop(); stream.close()
                 except Exception:   # noqa: BLE001
                     pass
-            self.stop.wait(3)
+            self.stop.wait(1)
 
     def shutdown(self, *_):
         self.stop.set()
@@ -344,9 +461,13 @@ class CryService:
 
 # ----------------------------------------------------------------------
 def cmd_list_devices():
-    import sounddevice as sd
-    print(sd.query_devices())
-    print("\nDefault input:", sd.default.device[0])
+    mic_select.print_mics()
+    try:
+        import sounddevice as sd
+        print("\nPerangkat sounddevice (untuk audio.device manual di config.yaml):")
+        print(sd.query_devices())
+    except Exception as e:   # noqa: BLE001
+        print(f"\nsounddevice tidak tersedia: {e}")
 
 
 def cmd_test_file(cfg: dict, path: str):
@@ -355,20 +476,23 @@ def cmd_test_file(cfg: dict, path: str):
     plan = model.plan
     y, sr = sf.read(path, dtype="float32", always_2d=True)
     y = resample(y.mean(axis=1), sr, plan.sample_rate)
-    win, hop = plan.window_samples, int(cfg["inference"].get("hop_seconds", 1.0) * plan.sample_rate)
-    silence_db = float(cfg["inference"].get("silence_db", -55))
+    win, hop = plan.window_samples, int(cfg["inference"].get("hop_seconds", 0.5) * plan.sample_rate)
+    silence_db = float(cfg["inference"].get("silence_db", -50))
+    sma_buf = deque(maxlen=int(cfg["inference"].get("sma_window", 4)))
     if len(y) < win:
         y = np.pad(y, (0, win - len(y)))
     for start in range(0, len(y) - win + 1, hop):
         w = y[start:start + win]
         db = level_db(w)
         if db < silence_db:
-            print(f"{start / plan.sample_rate:6.1f}s  {db:6.1f} dB  hening")
+            sma_buf.append(0.0)
+            print(f"{start / plan.sample_rate:6.1f}s  {db:6.1f} dB  hening    SMA={np.mean(sma_buf):.3f}")
             continue
         r = model.predict(w)
+        sma_buf.append(r["cry_prob"])
         extra = f"  alasan={r['window_reason']}" if "window_reason" in r else ""
         print(f"{start / plan.sample_rate:6.1f}s  {db:6.1f} dB  {r['label']:<8} "
-              f"cry_prob={r['cry_prob']:.3f}{extra}")
+              f"raw={r['cry_prob']:.3f}  SMA={np.mean(sma_buf):.3f}{extra}")
 
 
 def main():
