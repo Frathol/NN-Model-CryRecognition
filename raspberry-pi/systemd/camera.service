@@ -1,0 +1,18 @@
+# systemd service kamera Smart Incubator.
+# Dipasang oleh scripts/setup_camera.sh ke /etc/systemd/system/incubator-camera.service
+[Unit]
+Description=Smart Incubator - Camera (live stream & recording)
+After=network.target
+
+[Service]
+Type=simple
+User=__USER__
+SupplementaryGroups=video
+WorkingDirectory=__CAM_DIR__
+# Ubah opsi di sini lalu: sudo systemctl daemon-reload && sudo systemctl restart incubator-camera
+ExecStart=/usr/bin/python3 __CAM_DIR__/camera_service.py --width 1280 --height 720 --fps 15 --record-dir __REC_DIR__ --max-minutes 30
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
