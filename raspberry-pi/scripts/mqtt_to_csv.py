@@ -49,7 +49,8 @@ SCHEMAS = {
         "heart.bpm", "heart.contact", "heart.ir", "heart.sensor_ok",
         "weight.total_g", "weight.left_g", "weight.right_g", "weight.sensor_ok",
         "power.soc_pct", "power.mains_ok", "power.status",
-        "alarm.fsm_state", "alarm.buzzer_muted", "alarm.led_green", "alarm.led_yellow", "alarm.led_red",
+        "alarm.fsm_state", "alarm.clinical_code", "alarm.buzzer_mode", "alarm.buzzer_muted",
+        "alarm.heater_cutoff", "alarm.led_green", "alarm.led_yellow", "alarm.led_red",
         "uptime_s", "rssi",
     ],
     "incubator/cry/result": [

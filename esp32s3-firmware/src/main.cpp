@@ -518,6 +518,9 @@ void publishSensors() {
   alarm["clinical_code"] = state.clinicalCode;
   alarm["buzzer_mode"]   = state.manualBtnRequired ? "MANUAL_BUTTON_REQUIRED" : "AUTO_STAGE_DEPENDENT";
   alarm["buzzer_muted"]  = (state.manualBtnRequired && state.manualBuzzerAck);
+  float refCabin = !isnan(state.shtTemp) ? state.shtTemp : state.dhtTemp;
+  alarm["heater_cutoff"] = (!isnan(refCabin) && refCabin > CABIN_SAFE_MAX) ||
+                           (!isnan(state.ntcTemp) && state.ntcTemp > NTC_SAFE_MAX);
   alarm["led_green"]     = (strcmp(state.fsm, "NORMAL") == 0);
   alarm["led_yellow"]    = (strcmp(state.fsm, "WARN") == 0);
   alarm["led_red"]       = (strcmp(state.fsm, "CRITICAL") == 0);
