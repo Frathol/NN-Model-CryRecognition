@@ -19,13 +19,15 @@ ditampilkan real-time di web dashboard.
 
 | Folder | Isi |
 |---|---|
-| `esp32s3-firmware/` | Firmware PlatformIO (Arduino). Pengaturan di `include/config.h` |
+| `esp32s3-firmware/` | Firmware PlatformIO (Arduino). Pengaturan di `include/config.h` ([Panduan Firmware](esp32s3-firmware/README.md)) |
 | `raspberry-pi/mosquitto/` | Konfigurasi broker + ACL (setiap klien hanya boleh menulis ke topic miliknya) |
 | `raspberry-pi/nginx/` | Webserver dashboard + proxy WebSocket `/mqtt` |
-| `raspberry-pi/dashboard/` | Web dashboard (MQTT.js + Chart.js), batas alarm di `config.js` |
-| `raspberry-pi/cry-recognition/` | Layanan klasifikasi tangisan (TFLite) |
-| `raspberry-pi/scripts/` | `setup_pi.sh` (instalasi sekali jalan), `connect_bt_mic.sh` |
-| `raspberry-pi/systemd/` | User service agar cry recognition otomatis jalan saat boot |
+| `raspberry-pi/dashboard/` | Web dashboard (MQTT.js + Chart.js), batas alarm di `config.js` ([Panduan Dashboard](raspberry-pi/dashboard/README.md)) |
+| `raspberry-pi/cry-recognition/` | Layanan klasifikasi tangisan 2-tahap (TFLite) |
+| `raspberry-pi/loadcell/` | Driver & kalibrasi timbangan bayi HX711 di Raspberry Pi 5 ([Panduan Load Cell](raspberry-pi/loadcell/README.md)) |
+| `raspberry-pi/scripts/` | `setup_pi.sh`, `kirim_ke_pi.ps1`, `mqtt_to_csv.py`, `check_health.sh` ([Panduan Skrip](raspberry-pi/scripts/README.md)) |
+| `raspberry-pi/systemd/` | User service (`cry-recognition`, `fsm`, `camera`) agar otomatis jalan saat boot |
+| `docs/` | Dokumentasi arsitektur, [Skema MQTT](docs/MQTT_SCHEMA.md), dan [Aturan Klinis FSM](docs/FSM_CLINICAL_RULES.md) |
 
 ---
 
